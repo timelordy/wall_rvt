@@ -225,11 +225,9 @@ namespace WallRvt.Scripts
                 createdWalls.Add(newWall.Id);
             }
 
-            bool originalWallDeleted = false;
             try
             {
                 document.Delete(wall.Id);
-                originalWallDeleted = true;
             }
             catch (Autodesk.Revit.Exceptions.ArgumentException)
             {
