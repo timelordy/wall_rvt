@@ -225,7 +225,7 @@ namespace WallRvt.Scripts
                 createdWalls.Add(newWall.Id);
             }
 
-            // Delete the original wall now that we have created all layer walls
+            // Handle the original wall after creating all layer walls
             bool wallDeleted = false;
             try
             {
@@ -239,34 +239,54 @@ namespace WallRvt.Scripts
             }
             catch (Exception ex)
             {
-                // Try asking user for permission to force deletion
-                TaskDialogResult result = TaskDialog.Show("Wall Layer Splitter",
-                    $"Successfully created {createdWalls.Count} layer walls, but the original wall has dependencies.\n\n" +
-                    $"Error: {ex.Message}\n\n" +
-                    "Would you like to try force deletion? This will break all connections and remove dependent elements.",
-                    TaskDialogCommonButtons.Yes | TaskDialogCommonButtons.No);
+                // Offer three options: force delete, hide, or keep
+                TaskDialogResult result = ShowDeletionOptionsDialog(createdWalls.Count, ex.Message);
 
-                if (result == TaskDialogResult.Yes)
+                if (result == TaskDialogResult.Yes) // Force delete
                 {
                     try
                     {
                         ForceDeleteWall(document, wall);
                         wallDeleted = true;
-                        TaskDialog.Show("Wall Layer Splitter",
-                            "Force deletion successful! The original wall has been removed.");
+                        TaskDialog.Show("Wall Layer Splitter", "Force deletion successful! The original wall has been removed.");
                     }
                     catch (Exception forceEx)
                     {
-                        TaskDialog.Show("Wall Layer Splitter",
-                            $"Force deletion also failed: {forceEx.Message}\n\n" +
-                            "You may need to manually delete the original wall.");
+                        // If force deletion fails, try hiding the wall
+                        if (TryHideWall(document, wall))
+                        {
+                            TaskDialog.Show("Wall Layer Splitter",
+                                $"Force deletion failed, but the original wall has been hidden instead.\n\n" +
+                                $"Layer walls created successfully. The original wall is now hidden in the current view.");
+                        }
+                        else
+                        {
+                            TaskDialog.Show("Wall Layer Splitter",
+                                $"Force deletion and hiding both failed: {forceEx.Message}\n\n" +
+                                "The original wall remains visible. You may need to manually delete or hide it.");
+                        }
                     }
                 }
-                else
+                else if (result == TaskDialogResult.No) // Hide wall
+                {
+                    if (TryHideWall(document, wall))
+                    {
+                        TaskDialog.Show("Wall Layer Splitter",
+                            "Layer walls created successfully. The original wall has been hidden in the current view.\n\n" +
+                            "You can unhide it later if needed through View > Reveal Hidden Elements.");
+                    }
+                    else
+                    {
+                        TaskDialog.Show("Wall Layer Splitter",
+                            "Layer walls created successfully, but could not hide the original wall.\n\n" +
+                            "The original wall remains visible. You can manually hide or delete it.");
+                    }
+                }
+                else // Keep wall visible (Cancel)
                 {
                     TaskDialog.Show("Wall Layer Splitter",
                         "Layer walls created successfully. The original wall remains in place.\n\n" +
-                        "You can manually delete it when ready.");
+                        "You can manually delete or hide it when ready.");
                 }
             }
 
@@ -443,6 +463,70 @@ namespace WallRvt.Scripts
 
             // 7. Final deletion attempt
             document.Delete(wall.Id);
+        }
+
+        private static TaskDialogResult ShowDeletionOptionsDialog(int layerCount, string errorMessage)
+        {
+            TaskDialog dialog = new TaskDialog("Wall Layer Splitter")
+            {
+                MainInstruction = $"Successfully created {layerCount} layer walls, but cannot delete original wall.",
+                MainContent = $"Error: {errorMessage}\n\nChoose how to handle the original wall:",
+                CommonButtons = TaskDialogCommonButtons.None
+            };
+
+            dialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink1, "Force Delete",
+                "Try aggressive deletion (breaks all connections and removes dependencies)");
+            dialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink2, "Hide Wall",
+                "Hide the original wall in current view (safer option)");
+            dialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink3, "Keep Visible",
+                "Leave the original wall in place for manual handling");
+
+            dialog.DefaultButton = TaskDialogResult.CommandLink2;
+
+            TaskDialogResult result = dialog.Show();
+
+            switch (result)
+            {
+                case TaskDialogResult.CommandLink1:
+                    return TaskDialogResult.Yes; // Force delete
+                case TaskDialogResult.CommandLink2:
+                    return TaskDialogResult.No; // Hide wall
+                default:
+                    return TaskDialogResult.Cancel; // Keep visible
+            }
+        }
+
+        private static bool TryHideWall(Document document, Wall wall)
+        {
+            try
+            {
+                // Get the current view
+                View currentView = document.ActiveView;
+                if (currentView == null)
+                {
+                    // Try to get the first available view
+                    var views = new FilteredElementCollector(document)
+                        .OfClass(typeof(View))
+                        .Cast<View>()
+                        .Where(v => !v.IsTemplate && v.CanBePrinted)
+                        .ToList();
+
+                    currentView = views.FirstOrDefault();
+                }
+
+                if (currentView != null)
+                {
+                    // Hide the wall in the current view
+                    currentView.HideElements(new List<ElementId> { wall.Id });
+                    return true;
+                }
+
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static void ShowDetailedError(Wall wall, string mainMessage, List<string> diagnostics)
