@@ -225,19 +225,55 @@ namespace WallRvt.Scripts
                 createdWalls.Add(newWall.Id);
             }
 
+            bool originalWallDeleted = false;
             try
             {
                 document.Delete(wall.Id);
+                originalWallDeleted = true;
             }
             catch (Autodesk.Revit.Exceptions.ArgumentException)
             {
                 // Element cannot be deleted - this may happen if the wall is referenced by other elements
-                // In this case, we leave the original wall in place
+                // Delete the created walls to prevent overlaps and report the issue
+                foreach (var createdWallId in createdWalls)
+                {
+                    try
+                    {
+                        document.Delete(createdWallId);
+                    }
+                    catch
+                    {
+                        // Ignore deletion errors for created walls
+                    }
+                }
+
+                TaskDialog.Show("Wall Layer Splitter",
+                    $"Cannot split wall {wall.Id.IntegerValue}: Wall is referenced by other elements and cannot be deleted. " +
+                    "Please manually disconnect any joined walls or hosted elements before splitting.");
+
+                return new WallSplitResult(wall.Id, new List<ElementId>());
             }
             catch (Autodesk.Revit.Exceptions.InvalidOperationException)
             {
                 // Element cannot be deleted - this may happen if the wall is referenced by other elements
-                // In this case, we leave the original wall in place
+                // Delete the created walls to prevent overlaps and report the issue
+                foreach (var createdWallId in createdWalls)
+                {
+                    try
+                    {
+                        document.Delete(createdWallId);
+                    }
+                    catch
+                    {
+                        // Ignore deletion errors for created walls
+                    }
+                }
+
+                TaskDialog.Show("Wall Layer Splitter",
+                    $"Cannot split wall {wall.Id.IntegerValue}: Wall is referenced by other elements and cannot be deleted. " +
+                    "Please manually disconnect any joined walls or hosted elements before splitting.");
+
+                return new WallSplitResult(wall.Id, new List<ElementId>());
             }
 
             return new WallSplitResult(wall.Id, createdWalls);
