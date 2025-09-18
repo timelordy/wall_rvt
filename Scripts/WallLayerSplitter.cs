@@ -431,7 +431,42 @@ namespace WallRvt.Scripts
             const double millimetersPerFoot = 304.8;
             double widthMillimeters = layer.Width * millimetersPerFoot;
             string function = layer.Function.ToString();
-            return $"{baseType.Name} | Слой {index + 1} | {function} | {materialName} | {widthMillimeters:F0}мм";
+
+            string baseTypeName = SanitizeNameComponent(baseType.Name);
+            string layerDescriptor = $"Слой {index + 1}";
+            string functionName = SanitizeNameComponent(function);
+            string materialDisplayName = SanitizeNameComponent(materialName);
+            string widthDisplay = $"{widthMillimeters:F0}мм";
+
+            return string.Join(" - ", new[]
+            {
+                baseTypeName,
+                layerDescriptor,
+                functionName,
+                materialDisplayName,
+                widthDisplay
+            }.Where(part => !string.IsNullOrWhiteSpace(part)));
+        }
+
+        private static readonly char[] InvalidNameCharacters =
+        {
+            ':', ';', '{', '}', '[', ']', '|', '\\', '/', '<', '>', '?', '*', '"'
+        };
+
+        private static string SanitizeNameComponent(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+
+            StringBuilder builder = new StringBuilder(value.Length);
+            foreach (char ch in value)
+            {
+                builder.Append(InvalidNameCharacters.Contains(ch) ? '_' : ch);
+            }
+
+            return builder.ToString().Trim();
         }
 
         private Wall CreateWallFromLayer(Document document, Curve curve, WallType wallType, ElementId baseLevelId,
