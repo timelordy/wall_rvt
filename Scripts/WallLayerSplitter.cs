@@ -227,24 +227,17 @@ namespace WallRvt.Scripts
 
             try
             {
-                ICollection<ElementId> deletedIds = document.Delete(wall.Id);
-                if (deletedIds == null || !deletedIds.Contains(wall.Id))
-                {
-                    // If deletion failed, try to hide the original wall instead
-                    wall.get_Parameter(BuiltInParameter.ELEM_VISIBILITY_PARAM)?.Set(0);
-                }
+                document.Delete(wall.Id);
             }
             catch (Autodesk.Revit.Exceptions.ArgumentException)
             {
-                // Element cannot be deleted, try to hide it instead
-                Parameter visibilityParam = wall.get_Parameter(BuiltInParameter.ELEM_VISIBILITY_PARAM);
-                TrySetParameter(visibilityParam, () => visibilityParam.Set(0));
+                // Element cannot be deleted - this may happen if the wall is referenced by other elements
+                // In this case, we leave the original wall in place
             }
             catch (Autodesk.Revit.Exceptions.InvalidOperationException)
             {
-                // Element cannot be deleted, try to hide it instead
-                Parameter visibilityParam = wall.get_Parameter(BuiltInParameter.ELEM_VISIBILITY_PARAM);
-                TrySetParameter(visibilityParam, () => visibilityParam.Set(0));
+                // Element cannot be deleted - this may happen if the wall is referenced by other elements
+                // In this case, we leave the original wall in place
             }
 
             return new WallSplitResult(wall.Id, createdWalls);
