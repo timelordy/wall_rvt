@@ -215,8 +215,7 @@ namespace WallRvt.Scripts
                 double layerCenterOffset = CalculateLayerCenterOffset(layers, index, exteriorFaceOffset);
                 double offset = layerCenterOffset - referenceOffset;
 
-                // Add minimal offset to place layers adjacent to original wall instead of overlapping
-                // Use the actual layer width plus small spacing instead of total thickness
+                // Calculate position to place layers adjacent to each other
                 double previousLayersWidth = 0;
                 for (int i = 0; i < index; i++)
                 {
@@ -224,7 +223,7 @@ namespace WallRvt.Scripts
                         previousLayersWidth += layers[i].Width;
                 }
 
-                double adjacentOffset = totalThickness / 2 + previousLayersWidth + (layer.Width / 2) + (index * 0.05); // 0.05 feet minimal spacing
+                double adjacentOffset = totalThickness / 2 + previousLayersWidth + (layer.Width / 2); // No spacing - layers touch each other
                 XYZ layerTranslation = wallOrientation.Multiply(adjacentOffset);
                 Transform transform = Transform.CreateTranslation(layerTranslation);
                 Curve translatedCurve = baseCurve.CreateTransformed(transform);
