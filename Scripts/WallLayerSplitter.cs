@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.Exceptions;
 using Autodesk.Revit.UI;
@@ -18,6 +19,8 @@ namespace WallRvt.Scripts
     /// Логика команды разбита на небольшие методы, чтобы облегчить расширение —
     /// например, для добавления фильтрации типов стен или предварительного просмотра результата.
     /// </remarks>
+    [Transaction(TransactionMode.Manual)]
+    [Regeneration(RegenerationOption.Manual)]
     public class WallLayerSplitter : IExternalCommand
     {
         private readonly Dictionary<string, ElementId> _layerTypeCache = new Dictionary<string, ElementId>();
