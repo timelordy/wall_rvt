@@ -227,66 +227,69 @@ namespace WallRvt.Scripts
 
             // Handle the original wall after creating all layer walls
             bool wallDeleted = false;
-            try
-            {
-                PrepareWallForDeletion(document, wall);
-                document.Delete(wall.Id);
-                wallDeleted = true;
 
-                TaskDialog.Show("Wall Layer Splitter",
-                    $"Successfully split wall into {createdWalls.Count} layer walls.\n\n" +
-                    "The original wall has been replaced with individual layer walls at the same location.");
+            // First check if the wall can be deleted
+            if (document.CanDeleteElement(wall.Id))
+            {
+                try
+                {
+                    PrepareWallForDeletion(document, wall);
+                    document.Delete(wall.Id);
+                    wallDeleted = true;
+
+                    TaskDialog.Show("Wall Layer Splitter",
+                        $"Successfully split wall into {createdWalls.Count} layer walls.\n\n" +
+                        "The original wall has been replaced with individual layer walls at the same location.");
+                }
+                catch (Exception ex)
+                {
+                    TaskDialog.Show("Wall Layer Splitter",
+                        $"Successfully created {createdWalls.Count} layer walls, but deletion failed unexpectedly.\n\n" +
+                        $"Error: {ex.Message}\n\n" +
+                        "The original wall remains in place. You can manually delete it when ready.");
+                }
             }
-            catch (Exception ex)
+            else
             {
-                // Offer three options: force delete, hide, or keep
-                TaskDialogResult result = ShowDeletionOptionsDialog(createdWalls.Count, ex.Message);
+                // Wall cannot be deleted - offer force deletion option
+                TaskDialogResult result = TaskDialog.Show("Wall Layer Splitter",
+                    $"Successfully created {createdWalls.Count} layer walls.\n\n" +
+                    "The original wall cannot be deleted due to dependencies or constraints.\n\n" +
+                    "Would you like to try force deletion? This will break all connections and remove dependent elements.",
+                    TaskDialogCommonButtons.Yes | TaskDialogCommonButtons.No);
 
-                if (result == TaskDialogResult.Yes) // Force delete
+                if (result == TaskDialogResult.Yes)
                 {
                     try
                     {
                         ForceDeleteWall(document, wall);
-                        wallDeleted = true;
-                        TaskDialog.Show("Wall Layer Splitter", "Force deletion successful! The original wall has been removed.");
-                    }
-                    catch (Exception forceEx)
-                    {
-                        // If force deletion fails, try hiding the wall
-                        if (TryHideWall(document, wall))
+
+                        // Check again if we can delete it after force preparation
+                        if (document.CanDeleteElement(wall.Id))
                         {
-                            TaskDialog.Show("Wall Layer Splitter",
-                                $"Force deletion failed, but the original wall has been hidden instead.\n\n" +
-                                $"Layer walls created successfully. The original wall is now hidden in the current view.");
+                            document.Delete(wall.Id);
+                            wallDeleted = true;
+                            TaskDialog.Show("Wall Layer Splitter", "Force deletion successful! The original wall has been removed.");
                         }
                         else
                         {
                             TaskDialog.Show("Wall Layer Splitter",
-                                $"Force deletion and hiding both failed: {forceEx.Message}\n\n" +
-                                "The original wall remains visible. You may need to manually delete or hide it.");
+                                "Force deletion preparation completed, but the wall still cannot be deleted.\n\n" +
+                                "The original wall remains in place. You may need to manually resolve remaining constraints.");
                         }
                     }
-                }
-                else if (result == TaskDialogResult.No) // Hide wall
-                {
-                    if (TryHideWall(document, wall))
+                    catch (Exception forceEx)
                     {
                         TaskDialog.Show("Wall Layer Splitter",
-                            "Layer walls created successfully. The original wall has been hidden in the current view.\n\n" +
-                            "You can unhide it later if needed through View > Reveal Hidden Elements.");
-                    }
-                    else
-                    {
-                        TaskDialog.Show("Wall Layer Splitter",
-                            "Layer walls created successfully, but could not hide the original wall.\n\n" +
-                            "The original wall remains visible. You can manually hide or delete it.");
+                            $"Force deletion failed: {forceEx.Message}\n\n" +
+                            "The original wall remains in place. You may need to manually delete it.");
                     }
                 }
-                else // Keep wall visible (Cancel)
+                else
                 {
                     TaskDialog.Show("Wall Layer Splitter",
                         "Layer walls created successfully. The original wall remains in place.\n\n" +
-                        "You can manually delete or hide it when ready.");
+                        "You can manually delete it when ready.");
                 }
             }
 
@@ -354,7 +357,8 @@ namespace WallRvt.Scripts
 
         private static void ForceDeleteWall(Document document, Wall wall)
         {
-            // More aggressive deletion approach based on Revit API best practices
+            // Aggressive preparation for deletion - removes all constraints and dependencies
+            // Note: This method does NOT delete the wall itself, just prepares it for deletion
 
             // 1. Unpin the wall if it's pinned (critical for Revit 2024+)
             try
@@ -416,19 +420,25 @@ namespace WallRvt.Scripts
             try
             {
                 var hostedElements = wall.FindInserts(true, true, true, true).ToList();
-                foreach (var elementId in hostedElements)
+                if (hostedElements.Count > 0)
                 {
-                    try
+                    // Check which hosted elements can be deleted before attempting deletion
+                    var deletableHosted = hostedElements.Where(id => document.CanDeleteElement(id)).ToList();
+
+                    foreach (var elementId in deletableHosted)
                     {
-                        // Unpin hosted element if needed
-                        var hostedElement = document.GetElement(elementId);
-                        if (hostedElement != null && hostedElement.Pinned)
+                        try
                         {
-                            hostedElement.Pinned = false;
+                            // Unpin hosted element if needed
+                            var hostedElement = document.GetElement(elementId);
+                            if (hostedElement != null && hostedElement.Pinned)
+                            {
+                                hostedElement.Pinned = false;
+                            }
+                            document.Delete(elementId);
                         }
-                        document.Delete(elementId);
+                        catch { /* ignore hosted element deletion failures */ }
                     }
-                    catch { /* ignore hosted element deletion failures */ }
                 }
             }
             catch { /* ignore general hosted element handling */ }
@@ -437,32 +447,37 @@ namespace WallRvt.Scripts
             try
             {
                 var dependentIds = wall.GetDependentElements(null);
-                foreach (var depId in dependentIds)
+                if (dependentIds.Count > 0)
                 {
-                    try
+                    // Check which dependent elements can be deleted before attempting deletion
+                    var deletableDependents = dependentIds.Where(id => document.CanDeleteElement(id)).ToList();
+
+                    foreach (var depId in deletableDependents)
                     {
-                        // Unpin dependent element if needed
-                        var dependentElement = document.GetElement(depId);
-                        if (dependentElement != null && dependentElement.Pinned)
+                        try
                         {
-                            dependentElement.Pinned = false;
+                            // Unpin dependent element if needed
+                            var dependentElement = document.GetElement(depId);
+                            if (dependentElement != null && dependentElement.Pinned)
+                            {
+                                dependentElement.Pinned = false;
+                            }
+                            document.Delete(depId);
                         }
-                        document.Delete(depId);
+                        catch { /* ignore dependent element deletion failures */ }
                     }
-                    catch { /* ignore dependent element deletion failures */ }
                 }
             }
             catch { /* ignore general dependent element handling */ }
 
-            // 6. Final regeneration before wall deletion
+            // 6. Final regeneration before checking wall deletion eligibility
             try
             {
                 document.Regenerate();
             }
             catch { /* ignore regeneration errors */ }
 
-            // 7. Final deletion attempt
-            document.Delete(wall.Id);
+            // Note: Wall deletion is handled by the caller using CanDeleteElement check
         }
 
         private static TaskDialogResult ShowDeletionOptionsDialog(int layerCount, string errorMessage)
