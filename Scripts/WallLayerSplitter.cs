@@ -334,32 +334,65 @@ namespace WallRvt.Scripts
 
         private static void ForceDeleteWall(Document document, Wall wall)
         {
-            // More aggressive deletion approach
+            // More aggressive deletion approach based on Revit API best practices
 
-            // 1. Remove all connections more aggressively
+            // 1. Unpin the wall if it's pinned (critical for Revit 2024+)
             try
             {
-                // Disallow joins at both ends
-                WallUtils.DisallowWallJoinAtEnd(wall, 0);
-                WallUtils.DisallowWallJoinAtEnd(wall, 1);
+                if (wall.Pinned)
+                {
+                    wall.Pinned = false;
+                }
+            }
+            catch { /* ignore unpinning errors */ }
 
-                // Unjoin from all possible elements
-                var allElements = new FilteredElementCollector(document).ToList();
-                foreach (var element in allElements)
+            // 2. Disallow wall joins at both ends using proper loop approach
+            try
+            {
+                // Disallow joins at start of wall (index 0)
+                while (WallUtils.IsWallJoinAllowedAtEnd(wall, 0))
+                {
+                    WallUtils.DisallowWallJoinAtEnd(wall, 0);
+                }
+
+                // Disallow joins at end of wall (index 1)
+                while (WallUtils.IsWallJoinAllowedAtEnd(wall, 1))
+                {
+                    WallUtils.DisallowWallJoinAtEnd(wall, 1);
+                }
+
+                // Force document regeneration to apply join changes
+                document.Regenerate();
+            }
+            catch { /* ignore join disallowing errors */ }
+
+            // 3. Unjoin from all possible elements more efficiently
+            try
+            {
+                // Get only walls and structural elements that might be joined
+                var potentialJoinedElements = new FilteredElementCollector(document)
+                    .WhereElementIsNotElementType()
+                    .Where(e => e.Id != wall.Id &&
+                               (e is Wall || e.Category?.Id?.IntegerValue == (int)BuiltInCategory.OST_StructuralFraming ||
+                                e.Category?.Id?.IntegerValue == (int)BuiltInCategory.OST_StructuralColumns ||
+                                e.Category?.Id?.IntegerValue == (int)BuiltInCategory.OST_Floors))
+                    .ToList();
+
+                foreach (var element in potentialJoinedElements)
                 {
                     try
                     {
-                        if (element.Id != wall.Id && JoinGeometryUtils.AreElementsJoined(document, wall, element))
+                        if (JoinGeometryUtils.AreElementsJoined(document, wall, element))
                         {
                             JoinGeometryUtils.UnjoinGeometry(document, wall, element);
                         }
                     }
-                    catch { /* ignore */ }
+                    catch { /* ignore individual unjoin failures */ }
                 }
             }
-            catch { /* ignore */ }
+            catch { /* ignore general unjoining errors */ }
 
-            // 2. Remove all hosted elements forcefully
+            // 4. Remove all hosted elements forcefully
             try
             {
                 var hostedElements = wall.FindInserts(true, true, true, true).ToList();
@@ -367,14 +400,20 @@ namespace WallRvt.Scripts
                 {
                     try
                     {
+                        // Unpin hosted element if needed
+                        var hostedElement = document.GetElement(elementId);
+                        if (hostedElement != null && hostedElement.Pinned)
+                        {
+                            hostedElement.Pinned = false;
+                        }
                         document.Delete(elementId);
                     }
-                    catch { /* ignore */ }
+                    catch { /* ignore hosted element deletion failures */ }
                 }
             }
-            catch { /* ignore */ }
+            catch { /* ignore general hosted element handling */ }
 
-            // 3. Remove all dependent elements using dependency set
+            // 5. Remove all dependent elements using dependency set
             try
             {
                 var dependentIds = wall.GetDependentElements(null);
@@ -382,14 +421,27 @@ namespace WallRvt.Scripts
                 {
                     try
                     {
+                        // Unpin dependent element if needed
+                        var dependentElement = document.GetElement(depId);
+                        if (dependentElement != null && dependentElement.Pinned)
+                        {
+                            dependentElement.Pinned = false;
+                        }
                         document.Delete(depId);
                     }
-                    catch { /* ignore */ }
+                    catch { /* ignore dependent element deletion failures */ }
                 }
             }
-            catch { /* ignore */ }
+            catch { /* ignore general dependent element handling */ }
 
-            // 4. Final deletion attempt
+            // 6. Final regeneration before wall deletion
+            try
+            {
+                document.Regenerate();
+            }
+            catch { /* ignore regeneration errors */ }
+
+            // 7. Final deletion attempt
             document.Delete(wall.Id);
         }
 
