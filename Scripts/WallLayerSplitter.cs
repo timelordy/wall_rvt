@@ -7,6 +7,7 @@ using Autodesk.Revit.DB;
 using Autodesk.Revit.Exceptions;
 using Autodesk.Revit.UI;
 using Autodesk.Revit.UI.Selection;
+using RevitOperationCanceledException = Autodesk.Revit.Exceptions.OperationCanceledException;
 
 namespace WallRvt.Scripts
 {
@@ -96,7 +97,7 @@ namespace WallRvt.Scripts
                 ShowSummary(splitResults);
                 return Result.Succeeded;
             }
-            catch (OperationCanceledException)
+            catch (Exception ex) when (ex is RevitOperationCanceledException || ex is System.OperationCanceledException)
             {
                 message = "Выбор объектов отменён пользователем.";
                 return Result.Cancelled;
@@ -194,6 +195,10 @@ namespace WallRvt.Scripts
             int locationLine = wall.get_Parameter(BuiltInParameter.WALL_KEY_REF_PARAM).AsInteger();
 
             IList<CompoundStructureLayer> layers = structure.GetLayers();
+            WallLocationLine wallLocationLine = ResolveWallLocationLine(locationLine);
+            double totalThickness = CalculateTotalThickness(layers);
+            double exteriorFaceOffset = totalThickness / 2.0;
+            double referenceOffset = CalculateReferenceOffset(structure, layers, wallLocationLine, exteriorFaceOffset);
             for (int index = 0; index < layers.Count; index++)
             {
                 CompoundStructureLayer layer = layers[index];
@@ -204,7 +209,8 @@ namespace WallRvt.Scripts
 
                 WallType layerType = GetOrCreateLayerType(document, wall.WallType, layer, index);
 
-                double offset = structure.GetOffsetForLayer(index);
+                double layerCenterOffset = CalculateLayerCenterOffset(layers, index, exteriorFaceOffset);
+                double offset = layerCenterOffset - referenceOffset;
                 XYZ translation = wallOrientation.Multiply(offset);
                 Transform transform = Transform.CreateTranslation(translation);
                 Curve translatedCurve = baseCurve.CreateTransformed(transform);
@@ -262,11 +268,139 @@ namespace WallRvt.Scripts
             };
 
             newStructure.SetLayers(newLayers);
-            newStructure.StructuralMaterialId = layer.MaterialId;
             duplicatedType.SetCompoundStructure(newStructure);
+            SetStructuralMaterial(duplicatedType, layer.MaterialId);
 
             _layerTypeCache[cacheKey] = duplicatedType.Id;
             return duplicatedType;
+        }
+
+        private static double CalculateTotalThickness(IEnumerable<CompoundStructureLayer> layers)
+        {
+            double total = 0;
+            foreach (CompoundStructureLayer layer in layers)
+            {
+                total += layer.Width;
+            }
+
+            return total;
+        }
+
+        private static double CalculateLayerCenterOffset(IList<CompoundStructureLayer> layers, int layerIndex, double exteriorFaceOffset)
+        {
+            double cumulative = 0;
+            for (int i = 0; i < layerIndex; i++)
+            {
+                cumulative += layers[i].Width;
+            }
+
+            double centerFromExteriorFace = cumulative + layers[layerIndex].Width / 2.0;
+            return exteriorFaceOffset - centerFromExteriorFace;
+        }
+
+        private static double CalculateReferenceOffset(CompoundStructure structure, IList<CompoundStructureLayer> layers,
+            WallLocationLine wallLocationLine, double exteriorFaceOffset)
+        {
+            switch (wallLocationLine)
+            {
+                case WallLocationLine.WallCenterline:
+                    return 0;
+                case WallLocationLine.FinishFaceExterior:
+                    return exteriorFaceOffset;
+                case WallLocationLine.FinishFaceInterior:
+                    return -exteriorFaceOffset;
+                case WallLocationLine.CoreFaceExterior:
+                    return CalculateCoreFaceExteriorOffset(structure, layers, exteriorFaceOffset);
+                case WallLocationLine.CoreFaceInterior:
+                    return CalculateCoreFaceInteriorOffset(structure, layers, exteriorFaceOffset);
+                case WallLocationLine.CoreCenterline:
+                    return CalculateCoreCenterlineOffset(structure, layers, exteriorFaceOffset);
+                default:
+                    return 0;
+            }
+        }
+
+        private static double CalculateCoreFaceExteriorOffset(CompoundStructure structure, IList<CompoundStructureLayer> layers,
+            double exteriorFaceOffset)
+        {
+            if (!TryGetCoreThicknesses(structure, layers, out double exteriorThickness, out _, out _))
+            {
+                return 0;
+            }
+
+            return exteriorFaceOffset - exteriorThickness;
+        }
+
+        private static double CalculateCoreFaceInteriorOffset(CompoundStructure structure, IList<CompoundStructureLayer> layers,
+            double exteriorFaceOffset)
+        {
+            if (!TryGetCoreThicknesses(structure, layers, out _, out _, out double interiorThickness))
+            {
+                return 0;
+            }
+
+            return -exteriorFaceOffset + interiorThickness;
+        }
+
+        private static double CalculateCoreCenterlineOffset(CompoundStructure structure, IList<CompoundStructureLayer> layers,
+            double exteriorFaceOffset)
+        {
+            if (!TryGetCoreThicknesses(structure, layers, out double exteriorThickness, out double coreThickness, out _))
+            {
+                return 0;
+            }
+
+            return exteriorFaceOffset - (exteriorThickness + coreThickness / 2.0);
+        }
+
+        private static bool TryGetCoreThicknesses(CompoundStructure structure, IList<CompoundStructureLayer> layers,
+            out double exteriorThickness, out double coreThickness, out double interiorThickness)
+        {
+            exteriorThickness = 0;
+            coreThickness = 0;
+            interiorThickness = 0;
+
+            int firstCore = structure.GetFirstCoreLayerIndex();
+            int lastCore = structure.GetLastCoreLayerIndex();
+            if (firstCore < 0 || lastCore < 0 || lastCore < firstCore)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < layers.Count; i++)
+            {
+                double width = layers[i].Width;
+                if (i < firstCore)
+                {
+                    exteriorThickness += width;
+                }
+                else if (i > lastCore)
+                {
+                    interiorThickness += width;
+                }
+                else
+                {
+                    coreThickness += width;
+                }
+            }
+
+            return true;
+        }
+
+        private static WallLocationLine ResolveWallLocationLine(int parameterValue)
+        {
+            return Enum.IsDefined(typeof(WallLocationLine), parameterValue)
+                ? (WallLocationLine)parameterValue
+                : WallLocationLine.WallCenterline;
+        }
+
+        private static void SetStructuralMaterial(WallType wallType, ElementId materialId)
+        {
+            Parameter structuralMaterialParam = wallType.get_Parameter(BuiltInParameter.STRUCTURAL_MATERIAL_PARAM);
+            if (structuralMaterialParam != null && !structuralMaterialParam.IsReadOnly)
+            {
+                structuralMaterialParam.Set(materialId ?? ElementId.InvalidElementId);
+            }
         }
 
         private static string BuildLayerTypeName(WallType baseType, CompoundStructureLayer layer, int index)
