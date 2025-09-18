@@ -410,10 +410,12 @@ namespace WallRvt.Scripts
         private static void SetStructuralMaterial(WallType wallType, ElementId materialId)
         {
             Parameter structuralMaterialParam = wallType.get_Parameter(BuiltInParameter.STRUCTURAL_MATERIAL_PARAM);
-            if (structuralMaterialParam != null && !structuralMaterialParam.IsReadOnly)
+            if (materialId == ElementId.InvalidElementId)
             {
-                structuralMaterialParam.Set(materialId ?? ElementId.InvalidElementId);
+                return;
             }
+
+            TrySetParameter(structuralMaterialParam, () => structuralMaterialParam.Set(materialId));
         }
 
         private static string BuildLayerTypeName(WallType baseType, CompoundStructureLayer layer, int index)
@@ -476,27 +478,27 @@ namespace WallRvt.Scripts
             Wall newWall = Wall.Create(document, curve, wallType.Id, baseLevelId, unconnectedHeight, baseOffset, flipped, structural);
 
             Parameter topConstraintParam = newWall.get_Parameter(BuiltInParameter.WALL_HEIGHT_TYPE);
-            if (topConstraintParam != null && topConstraintId != ElementId.InvalidElementId)
+            if (topConstraintId != ElementId.InvalidElementId)
             {
-                topConstraintParam.Set(topConstraintId);
+                TrySetParameter(topConstraintParam, () => topConstraintParam.Set(topConstraintId));
             }
             else
             {
                 Parameter unconnectedHeightParam = newWall.get_Parameter(BuiltInParameter.WALL_USER_HEIGHT_PARAM);
-                unconnectedHeightParam?.Set(unconnectedHeight);
+                TrySetParameter(unconnectedHeightParam, () => unconnectedHeightParam.Set(unconnectedHeight));
             }
 
             Parameter topOffsetParam = newWall.get_Parameter(BuiltInParameter.WALL_TOP_OFFSET);
-            topOffsetParam?.Set(topOffset);
+            TrySetParameter(topOffsetParam, () => topOffsetParam.Set(topOffset));
 
             Parameter baseOffsetParam = newWall.get_Parameter(BuiltInParameter.WALL_BASE_OFFSET);
-            baseOffsetParam?.Set(baseOffset);
+            TrySetParameter(baseOffsetParam, () => baseOffsetParam.Set(baseOffset));
 
             Parameter baseConstraintParam = newWall.get_Parameter(BuiltInParameter.WALL_BASE_CONSTRAINT);
-            baseConstraintParam?.Set(baseLevelId);
+            TrySetParameter(baseConstraintParam, () => baseConstraintParam.Set(baseLevelId));
 
             Parameter locationLineParam = newWall.get_Parameter(BuiltInParameter.WALL_KEY_REF_PARAM);
-            locationLineParam?.Set(locationLine);
+            TrySetParameter(locationLineParam, () => locationLineParam.Set(locationLine));
 
             return newWall;
         }
@@ -516,7 +518,12 @@ namespace WallRvt.Scripts
             {
                 Parameter sourceParameter = source.get_Parameter(builtInParameter);
                 Parameter targetParameter = target.get_Parameter(builtInParameter);
-                if (sourceParameter != null && targetParameter != null && !targetParameter.IsReadOnly)
+                if (sourceParameter == null || targetParameter == null)
+                {
+                    continue;
+                }
+
+                TrySetParameter(targetParameter, () =>
                 {
                     switch (sourceParameter.StorageType)
                     {
@@ -533,7 +540,26 @@ namespace WallRvt.Scripts
                             targetParameter.Set(sourceParameter.AsElementId());
                             break;
                     }
-                }
+                });
+            }
+        }
+
+        private static void TrySetParameter(Parameter parameter, Action setter)
+        {
+            if (parameter == null || parameter.IsReadOnly)
+            {
+                return;
+            }
+
+            try
+            {
+                setter();
+            }
+            catch (Autodesk.Revit.Exceptions.InvalidOperationException)
+            {
+            }
+            catch (Autodesk.Revit.Exceptions.ArgumentException)
+            {
             }
         }
 
