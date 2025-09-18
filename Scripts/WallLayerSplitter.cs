@@ -325,7 +325,14 @@ namespace WallRvt.Scripts
                     return false;
                 }
 
-                // Step 4: Check for other potential blockers
+                // Step 4: Handle dependent elements (dimensions, annotations, etc.)
+                var dependentElementsCount = HandleDependentElements(document, wall);
+                if (dependentElementsCount > 0)
+                {
+                    diagnostics.Add($"Removed {dependentElementsCount} dependent elements (dimensions/annotations)");
+                }
+
+                // Step 5: Check for other potential blockers
                 var remainingBlockers = DiagnoseRemainingDependencies(document, wall);
                 if (remainingBlockers.Count > 0)
                 {
@@ -450,6 +457,90 @@ namespace WallRvt.Scripts
             }
         }
 
+        private static int HandleDependentElements(Document document, Wall wall)
+        {
+            int removedCount = 0;
+            try
+            {
+                // Get all dependent elements
+                var dependentElementIds = wall.GetDependentElements(null);
+                var elementsToDelete = new List<ElementId>();
+
+                foreach (var depId in dependentElementIds)
+                {
+                    try
+                    {
+                        var element = document.GetElement(depId);
+                        if (element == null) continue;
+
+                        // Check if this is a dimension, annotation, or other deletable dependent element
+                        if (IsDeletableDependentElement(element))
+                        {
+                            elementsToDelete.Add(depId);
+                        }
+                    }
+                    catch
+                    {
+                        // Skip elements that can't be accessed
+                    }
+                }
+
+                // Delete the dependent elements that can be safely removed
+                if (elementsToDelete.Count > 0)
+                {
+                    try
+                    {
+                        var deletedIds = document.Delete(elementsToDelete);
+                        removedCount = deletedIds.Count;
+                    }
+                    catch
+                    {
+                        // Try deleting elements one by one if batch deletion fails
+                        foreach (var id in elementsToDelete)
+                        {
+                            try
+                            {
+                                document.Delete(id);
+                                removedCount++;
+                            }
+                            catch
+                            {
+                                // Skip elements that can't be deleted
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // If dependent element handling fails, continue
+            }
+
+            return removedCount;
+        }
+
+        private static bool IsDeletableDependentElement(Element element)
+        {
+            try
+            {
+                var category = element.Category;
+                if (category == null) return false;
+
+                var categoryId = category.Id;
+
+                // These categories can usually be safely deleted when splitting walls
+                return categoryId == new ElementId(BuiltInCategory.OST_Dimensions) ||
+                       categoryId == new ElementId(BuiltInCategory.OST_GenericAnnotation) ||
+                       categoryId == new ElementId(BuiltInCategory.OST_TextNotes) ||
+                       categoryId == new ElementId(BuiltInCategory.OST_DetailComponents) ||
+                       categoryId == new ElementId(BuiltInCategory.OST_Tags);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private static bool IsWallInGroup(Wall wall)
         {
             try
@@ -501,15 +592,37 @@ namespace WallRvt.Scripts
                     blockers.Add("Remaining hosted elements: " + string.Join(", ", hostCategories));
                 }
 
-                // Check for sketched elements using this wall as a reference
-                var sketches = new FilteredElementCollector(document)
-                    .WhereElementIsNotElementType()
-                    .Where(e => e.GetDependentElements(null).Contains(wall.Id))
-                    .ToList();
-
-                if (sketches.Count > 0)
+                // Check for remaining dependent elements using this wall as a reference
+                var dependentElementIds = wall.GetDependentElements(null);
+                if (dependentElementIds.Count > 0)
                 {
-                    blockers.Add($"Referenced by {sketches.Count} dependent elements");
+                    var dependentByCategory = new Dictionary<string, int>();
+
+                    foreach (var depId in dependentElementIds)
+                    {
+                        try
+                        {
+                            var element = document.GetElement(depId);
+                            if (element?.Category != null)
+                            {
+                                var categoryName = element.Category.Name;
+                                dependentByCategory[categoryName] = dependentByCategory.GetValueOrDefault(categoryName, 0) + 1;
+                            }
+                            else
+                            {
+                                dependentByCategory["Unknown"] = dependentByCategory.GetValueOrDefault("Unknown", 0) + 1;
+                            }
+                        }
+                        catch
+                        {
+                            dependentByCategory["Inaccessible"] = dependentByCategory.GetValueOrDefault("Inaccessible", 0) + 1;
+                        }
+                    }
+
+                    var dependentDescription = string.Join(", ",
+                        dependentByCategory.Select(kvp => $"{kvp.Key} ({kvp.Value})"));
+
+                    blockers.Add($"Still referenced by dependent elements: {dependentDescription}");
                 }
             }
             catch (Exception ex)
