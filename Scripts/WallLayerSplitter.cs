@@ -214,8 +214,11 @@ namespace WallRvt.Scripts
 
                 double layerCenterOffset = CalculateLayerCenterOffset(layers, index, exteriorFaceOffset);
                 double offset = layerCenterOffset - referenceOffset;
-                XYZ translation = wallOrientation.Multiply(offset);
-                Transform transform = Transform.CreateTranslation(translation);
+
+                // Add additional offset to place layers adjacent to original wall instead of overlapping
+                double adjacentOffset = totalThickness + (index * 0.3); // 0.3 feet spacing between layers
+                XYZ layerTranslation = wallOrientation.Multiply(offset + adjacentOffset);
+                Transform transform = Transform.CreateTranslation(layerTranslation);
                 Curve translatedCurve = baseCurve.CreateTransformed(transform);
 
                 Wall newWall = CreateWallFromLayer(document, translatedCurve, layerType, baseLevelId, baseOffset,
@@ -225,75 +228,12 @@ namespace WallRvt.Scripts
                 createdWalls.Add(newWall.Id);
             }
 
-            // Try to automatically resolve dependencies before deletion
-            if (!PrepareWallForDeletion(document, wall))
-            {
-                // If we can't resolve dependencies, clean up created walls and report failure
-                foreach (var createdWallId in createdWalls)
-                {
-                    try
-                    {
-                        document.Delete(createdWallId);
-                    }
-                    catch
-                    {
-                        // Ignore deletion errors for created walls
-                    }
-                }
-
-                TaskDialog.Show("Wall Layer Splitter",
-                    $"Cannot split wall {wall.Id.IntegerValue}: Wall has dependencies that cannot be automatically resolved. " +
-                    "The wall may be part of a group or have complex constraints that require manual intervention.");
-
-                return new WallSplitResult(wall.Id, new List<ElementId>());
-            }
-
-            try
-            {
-                document.Delete(wall.Id);
-            }
-            catch (Autodesk.Revit.Exceptions.ArgumentException)
-            {
-                // Element still cannot be deleted - this may happen if there are hidden dependencies
-                // Delete the created walls to prevent overlaps and report the issue
-                foreach (var createdWallId in createdWalls)
-                {
-                    try
-                    {
-                        document.Delete(createdWallId);
-                    }
-                    catch
-                    {
-                        // Ignore deletion errors for created walls
-                    }
-                }
-
-                TaskDialog.Show("Wall Layer Splitter",
-                    $"Cannot split wall {wall.Id.IntegerValue}: Wall still has unresolved dependencies after automatic processing.");
-
-                return new WallSplitResult(wall.Id, new List<ElementId>());
-            }
-            catch (Autodesk.Revit.Exceptions.InvalidOperationException)
-            {
-                // Element still cannot be deleted - this may happen if there are hidden dependencies
-                // Delete the created walls to prevent overlaps and report the issue
-                foreach (var createdWallId in createdWalls)
-                {
-                    try
-                    {
-                        document.Delete(createdWallId);
-                    }
-                    catch
-                    {
-                        // Ignore deletion errors for created walls
-                    }
-                }
-
-                TaskDialog.Show("Wall Layer Splitter",
-                    $"Cannot split wall {wall.Id.IntegerValue}: Wall still has unresolved dependencies after automatic processing.");
-
-                return new WallSplitResult(wall.Id, new List<ElementId>());
-            }
+            // Success! New walls created for each layer
+            // Note: Original wall is left in place - user can manually delete it if desired
+            TaskDialog.Show("Wall Layer Splitter",
+                $"Successfully split wall {wall.Id.IntegerValue} into {createdWalls.Count} layer walls.\n\n" +
+                "The original wall has been left in place. You can manually delete it if no longer needed.\n" +
+                "The new layer walls are positioned adjacent to the original location.");
 
             return new WallSplitResult(wall.Id, createdWalls);
         }
