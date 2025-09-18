@@ -302,28 +302,71 @@ namespace WallRvt.Scripts
         {
             try
             {
+                var diagnostics = new List<string>();
+
                 // Step 1: Unjoin all walls connected to this wall
-                UnjoinConnectedWalls(document, wall);
+                var joinedWallsCount = UnjoinConnectedWalls(document, wall);
+                if (joinedWallsCount > 0)
+                {
+                    diagnostics.Add($"Unjoined {joinedWallsCount} connected walls");
+                }
 
                 // Step 2: Handle hosted elements (doors, windows, etc.)
-                HandleHostedElements(document, wall);
+                var hostedElementsCount = HandleHostedElements(document, wall);
+                if (hostedElementsCount > 0)
+                {
+                    diagnostics.Add($"Removed {hostedElementsCount} hosted elements (doors/windows)");
+                }
 
                 // Step 3: Check if wall is part of a group
                 if (IsWallInGroup(wall))
                 {
-                    return false; // Cannot automatically handle grouped elements
+                    ShowDetailedError(wall, "Wall is part of a group and cannot be automatically processed", diagnostics);
+                    return false;
+                }
+
+                // Step 4: Check for other potential blockers
+                var remainingBlockers = DiagnoseRemainingDependencies(document, wall);
+                if (remainingBlockers.Count > 0)
+                {
+                    ShowDetailedError(wall, "Wall has remaining dependencies", diagnostics.Concat(remainingBlockers).ToList());
+                    return false;
+                }
+
+                if (diagnostics.Count > 0)
+                {
+                    TaskDialog.Show("Wall Layer Splitter",
+                        $"Automatic processing completed for wall {wall.Id.IntegerValue}:\n" +
+                        string.Join("\n", diagnostics.Select(d => "• " + d)));
                 }
 
                 return true;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                return false; // If any error occurs during preparation, return false
+                TaskDialog.Show("Wall Layer Splitter",
+                    $"Error during automatic processing of wall {wall.Id.IntegerValue}: {ex.Message}");
+                return false;
             }
         }
 
-        private static void UnjoinConnectedWalls(Document document, Wall wall)
+        private static void ShowDetailedError(Wall wall, string mainMessage, List<string> diagnostics)
         {
+            var message = $"{mainMessage} for wall {wall.Id.IntegerValue}";
+
+            if (diagnostics.Count > 0)
+            {
+                message += "\n\nActions taken:\n" + string.Join("\n", diagnostics.Select(d => "• " + d));
+            }
+
+            message += "\n\nThis wall requires manual intervention before it can be split into layers.";
+
+            TaskDialog.Show("Wall Layer Splitter", message);
+        }
+
+        private static int UnjoinConnectedWalls(Document document, Wall wall)
+        {
+            int unjoinedCount = 0;
             try
             {
                 // Get all walls in the document
@@ -340,10 +383,10 @@ namespace WallRvt.Scripts
                     try
                     {
                         // Check if walls are joined and unjoin them
-                        if (WallUtils.IsWallJoinAllowedAtEnd(wall, 0) &&
-                            JoinGeometryUtils.AreElementsJoined(document, wall, otherWall))
+                        if (JoinGeometryUtils.AreElementsJoined(document, wall, otherWall))
                         {
                             JoinGeometryUtils.UnjoinGeometry(document, wall, otherWall);
+                            unjoinedCount++;
                         }
                     }
                     catch
@@ -352,7 +395,7 @@ namespace WallRvt.Scripts
                     }
                 }
 
-                // Also try to unjoin at both ends of the wall
+                // Also try to disallow joins at both ends of the wall
                 try
                 {
                     WallUtils.DisallowWallJoinAtEnd(wall, 0);
@@ -364,9 +407,10 @@ namespace WallRvt.Scripts
             {
                 // If general unjoining fails, continue
             }
+            return unjoinedCount;
         }
 
-        private static void HandleHostedElements(Document document, Wall wall)
+        private static int HandleHostedElements(Document document, Wall wall)
         {
             try
             {
@@ -394,11 +438,15 @@ namespace WallRvt.Scripts
                 if (elementsToDelete.Count > 0)
                 {
                     document.Delete(elementsToDelete);
+                    return elementsToDelete.Count;
                 }
+
+                return 0;
             }
             catch
             {
                 // If hosted element handling fails, continue
+                return 0;
             }
         }
 
@@ -412,6 +460,64 @@ namespace WallRvt.Scripts
             {
                 return false;
             }
+        }
+
+        private static List<string> DiagnoseRemainingDependencies(Document document, Wall wall)
+        {
+            var blockers = new List<string>();
+
+            try
+            {
+                // Check for remaining joined walls
+                var allWalls = new FilteredElementCollector(document)
+                    .OfClass(typeof(Wall))
+                    .Cast<Wall>()
+                    .ToList();
+
+                var joinedWalls = allWalls.Where(w => w.Id != wall.Id &&
+                    JoinGeometryUtils.AreElementsJoined(document, wall, w)).ToList();
+
+                if (joinedWalls.Count > 0)
+                {
+                    blockers.Add($"Still joined to {joinedWalls.Count} walls: " +
+                        string.Join(", ", joinedWalls.Select(w => w.Id.IntegerValue).Take(3)) +
+                        (joinedWalls.Count > 3 ? "..." : ""));
+                }
+
+                // Check for remaining hosted elements
+                var remainingHosted = new FilteredElementCollector(document)
+                    .OfClass(typeof(FamilyInstance))
+                    .Cast<FamilyInstance>()
+                    .Where(fi => fi.Host != null && fi.Host.Id == wall.Id)
+                    .ToList();
+
+                if (remainingHosted.Count > 0)
+                {
+                    var hostCategories = remainingHosted
+                        .GroupBy(h => h.Category?.Name ?? "Unknown")
+                        .Select(g => $"{g.Key} ({g.Count()})")
+                        .ToList();
+
+                    blockers.Add("Remaining hosted elements: " + string.Join(", ", hostCategories));
+                }
+
+                // Check for sketched elements using this wall as a reference
+                var sketches = new FilteredElementCollector(document)
+                    .WhereElementIsNotElementType()
+                    .Where(e => e.GetDependentElements(null).Contains(wall.Id))
+                    .ToList();
+
+                if (sketches.Count > 0)
+                {
+                    blockers.Add($"Referenced by {sketches.Count} dependent elements");
+                }
+            }
+            catch (Exception ex)
+            {
+                blockers.Add($"Error during dependency check: {ex.Message}");
+            }
+
+            return blockers;
         }
 
         private static string BuildLayerTypeKey(ElementId baseTypeId, CompoundStructureLayer layer, int index)
