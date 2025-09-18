@@ -226,35 +226,21 @@ namespace WallRvt.Scripts
             }
 
             // Handle the original wall after creating all layer walls
-            bool wallDeleted = false;
-
-            // First check if the wall can be deleted
-            if (document.CanDeleteElement(wall.Id))
+            try
             {
-                try
-                {
-                    PrepareWallForDeletion(document, wall);
-                    document.Delete(wall.Id);
-                    wallDeleted = true;
+                PrepareWallForDeletion(document, wall);
+                document.Delete(wall.Id);
 
-                    TaskDialog.Show("Wall Layer Splitter",
-                        $"Successfully split wall into {createdWalls.Count} layer walls.\n\n" +
-                        "The original wall has been replaced with individual layer walls at the same location.");
-                }
-                catch (Exception ex)
-                {
-                    TaskDialog.Show("Wall Layer Splitter",
-                        $"Successfully created {createdWalls.Count} layer walls, but deletion failed unexpectedly.\n\n" +
-                        $"Error: {ex.Message}\n\n" +
-                        "The original wall remains in place. You can manually delete it when ready.");
-                }
+                TaskDialog.Show("Wall Layer Splitter",
+                    $"Successfully split wall into {createdWalls.Count} layer walls.\n\n" +
+                    "The original wall has been replaced with individual layer walls at the same location.");
             }
-            else
+            catch (Exception ex)
             {
                 // Wall cannot be deleted - offer force deletion option
                 TaskDialogResult result = TaskDialog.Show("Wall Layer Splitter",
-                    $"Successfully created {createdWalls.Count} layer walls.\n\n" +
-                    "The original wall cannot be deleted due to dependencies or constraints.\n\n" +
+                    $"Successfully created {createdWalls.Count} layer walls, but the original wall cannot be deleted.\n\n" +
+                    $"Error: {ex.Message}\n\n" +
                     "Would you like to try force deletion? This will break all connections and remove dependent elements.",
                     TaskDialogCommonButtons.Yes | TaskDialogCommonButtons.No);
 
@@ -263,25 +249,13 @@ namespace WallRvt.Scripts
                     try
                     {
                         ForceDeleteWall(document, wall);
-
-                        // Check again if we can delete it after force preparation
-                        if (document.CanDeleteElement(wall.Id))
-                        {
-                            document.Delete(wall.Id);
-                            wallDeleted = true;
-                            TaskDialog.Show("Wall Layer Splitter", "Force deletion successful! The original wall has been removed.");
-                        }
-                        else
-                        {
-                            TaskDialog.Show("Wall Layer Splitter",
-                                "Force deletion preparation completed, but the wall still cannot be deleted.\n\n" +
-                                "The original wall remains in place. You may need to manually resolve remaining constraints.");
-                        }
+                        document.Delete(wall.Id);
+                        TaskDialog.Show("Wall Layer Splitter", "Force deletion successful! The original wall has been removed.");
                     }
                     catch (Exception forceEx)
                     {
                         TaskDialog.Show("Wall Layer Splitter",
-                            $"Force deletion failed: {forceEx.Message}\n\n" +
+                            $"Force deletion also failed: {forceEx.Message}\n\n" +
                             "The original wall remains in place. You may need to manually delete it.");
                     }
                 }
@@ -420,25 +394,19 @@ namespace WallRvt.Scripts
             try
             {
                 var hostedElements = wall.FindInserts(true, true, true, true).ToList();
-                if (hostedElements.Count > 0)
+                foreach (var elementId in hostedElements)
                 {
-                    // Check which hosted elements can be deleted before attempting deletion
-                    var deletableHosted = hostedElements.Where(id => document.CanDeleteElement(id)).ToList();
-
-                    foreach (var elementId in deletableHosted)
+                    try
                     {
-                        try
+                        // Unpin hosted element if needed
+                        var hostedElement = document.GetElement(elementId);
+                        if (hostedElement != null && hostedElement.Pinned)
                         {
-                            // Unpin hosted element if needed
-                            var hostedElement = document.GetElement(elementId);
-                            if (hostedElement != null && hostedElement.Pinned)
-                            {
-                                hostedElement.Pinned = false;
-                            }
-                            document.Delete(elementId);
+                            hostedElement.Pinned = false;
                         }
-                        catch { /* ignore hosted element deletion failures */ }
+                        document.Delete(elementId);
                     }
+                    catch { /* ignore hosted element deletion failures */ }
                 }
             }
             catch { /* ignore general hosted element handling */ }
@@ -447,37 +415,31 @@ namespace WallRvt.Scripts
             try
             {
                 var dependentIds = wall.GetDependentElements(null);
-                if (dependentIds.Count > 0)
+                foreach (var depId in dependentIds)
                 {
-                    // Check which dependent elements can be deleted before attempting deletion
-                    var deletableDependents = dependentIds.Where(id => document.CanDeleteElement(id)).ToList();
-
-                    foreach (var depId in deletableDependents)
+                    try
                     {
-                        try
+                        // Unpin dependent element if needed
+                        var dependentElement = document.GetElement(depId);
+                        if (dependentElement != null && dependentElement.Pinned)
                         {
-                            // Unpin dependent element if needed
-                            var dependentElement = document.GetElement(depId);
-                            if (dependentElement != null && dependentElement.Pinned)
-                            {
-                                dependentElement.Pinned = false;
-                            }
-                            document.Delete(depId);
+                            dependentElement.Pinned = false;
                         }
-                        catch { /* ignore dependent element deletion failures */ }
+                        document.Delete(depId);
                     }
+                    catch { /* ignore dependent element deletion failures */ }
                 }
             }
             catch { /* ignore general dependent element handling */ }
 
-            // 6. Final regeneration before checking wall deletion eligibility
+            // 6. Final regeneration after cleanup
             try
             {
                 document.Regenerate();
             }
             catch { /* ignore regeneration errors */ }
 
-            // Note: Wall deletion is handled by the caller using CanDeleteElement check
+            // Note: Wall deletion is handled by the caller
         }
 
         private static TaskDialogResult ShowDeletionOptionsDialog(int layerCount, string errorMessage)
