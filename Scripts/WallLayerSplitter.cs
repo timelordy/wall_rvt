@@ -355,13 +355,8 @@ namespace WallRvt.Scripts
                 // Also try to unjoin at both ends of the wall
                 try
                 {
-                    WallUtils.UnjoinWallsAtEnd(wall, 0);
-                }
-                catch { }
-
-                try
-                {
-                    WallUtils.UnjoinWallsAtEnd(wall, 1);
+                    WallUtils.DisallowWallJoinAtEnd(wall, 0);
+                    WallUtils.DisallowWallJoinAtEnd(wall, 1);
                 }
                 catch { }
             }
@@ -375,25 +370,23 @@ namespace WallRvt.Scripts
         {
             try
             {
-                // Get all elements hosted by this wall
+                // Get all family instances that might be hosted by this wall
                 var hostedElements = new FilteredElementCollector(document)
-                    .WhereElementIsNotElementType()
-                    .Where(e => e.Host != null && e.Host.Id == wall.Id)
+                    .OfClass(typeof(FamilyInstance))
+                    .Cast<FamilyInstance>()
+                    .Where(fi => fi.Host != null && fi.Host.Id == wall.Id)
                     .ToList();
 
                 var elementsToDelete = new List<ElementId>();
 
-                foreach (var hostedElement in hostedElements)
+                foreach (var familyInstance in hostedElements)
                 {
                     // For doors and windows, we'll delete them as they can't be easily transferred
-                    if (hostedElement is FamilyInstance familyInstance)
+                    var category = familyInstance.Category;
+                    if (category?.Id == new ElementId(BuiltInCategory.OST_Doors) ||
+                        category?.Id == new ElementId(BuiltInCategory.OST_Windows))
                     {
-                        var category = familyInstance.Category;
-                        if (category?.Id == new ElementId(BuiltInCategory.OST_Doors) ||
-                            category?.Id == new ElementId(BuiltInCategory.OST_Windows))
-                        {
-                            elementsToDelete.Add(hostedElement.Id);
-                        }
+                        elementsToDelete.Add(familyInstance.Id);
                     }
                 }
 
