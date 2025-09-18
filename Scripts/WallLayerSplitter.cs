@@ -225,13 +225,36 @@ namespace WallRvt.Scripts
                 createdWalls.Add(newWall.Id);
             }
 
+            // Try to automatically resolve dependencies before deletion
+            if (!PrepareWallForDeletion(document, wall))
+            {
+                // If we can't resolve dependencies, clean up created walls and report failure
+                foreach (var createdWallId in createdWalls)
+                {
+                    try
+                    {
+                        document.Delete(createdWallId);
+                    }
+                    catch
+                    {
+                        // Ignore deletion errors for created walls
+                    }
+                }
+
+                TaskDialog.Show("Wall Layer Splitter",
+                    $"Cannot split wall {wall.Id.IntegerValue}: Wall has dependencies that cannot be automatically resolved. " +
+                    "The wall may be part of a group or have complex constraints that require manual intervention.");
+
+                return new WallSplitResult(wall.Id, new List<ElementId>());
+            }
+
             try
             {
                 document.Delete(wall.Id);
             }
             catch (Autodesk.Revit.Exceptions.ArgumentException)
             {
-                // Element cannot be deleted - this may happen if the wall is referenced by other elements
+                // Element still cannot be deleted - this may happen if there are hidden dependencies
                 // Delete the created walls to prevent overlaps and report the issue
                 foreach (var createdWallId in createdWalls)
                 {
@@ -246,14 +269,13 @@ namespace WallRvt.Scripts
                 }
 
                 TaskDialog.Show("Wall Layer Splitter",
-                    $"Cannot split wall {wall.Id.IntegerValue}: Wall is referenced by other elements and cannot be deleted. " +
-                    "Please manually disconnect any joined walls or hosted elements before splitting.");
+                    $"Cannot split wall {wall.Id.IntegerValue}: Wall still has unresolved dependencies after automatic processing.");
 
                 return new WallSplitResult(wall.Id, new List<ElementId>());
             }
             catch (Autodesk.Revit.Exceptions.InvalidOperationException)
             {
-                // Element cannot be deleted - this may happen if the wall is referenced by other elements
+                // Element still cannot be deleted - this may happen if there are hidden dependencies
                 // Delete the created walls to prevent overlaps and report the issue
                 foreach (var createdWallId in createdWalls)
                 {
@@ -268,13 +290,135 @@ namespace WallRvt.Scripts
                 }
 
                 TaskDialog.Show("Wall Layer Splitter",
-                    $"Cannot split wall {wall.Id.IntegerValue}: Wall is referenced by other elements and cannot be deleted. " +
-                    "Please manually disconnect any joined walls or hosted elements before splitting.");
+                    $"Cannot split wall {wall.Id.IntegerValue}: Wall still has unresolved dependencies after automatic processing.");
 
                 return new WallSplitResult(wall.Id, new List<ElementId>());
             }
 
             return new WallSplitResult(wall.Id, createdWalls);
+        }
+
+        private static bool PrepareWallForDeletion(Document document, Wall wall)
+        {
+            try
+            {
+                // Step 1: Unjoin all walls connected to this wall
+                UnjoinConnectedWalls(document, wall);
+
+                // Step 2: Handle hosted elements (doors, windows, etc.)
+                HandleHostedElements(document, wall);
+
+                // Step 3: Check if wall is part of a group
+                if (IsWallInGroup(wall))
+                {
+                    return false; // Cannot automatically handle grouped elements
+                }
+
+                return true;
+            }
+            catch (Exception)
+            {
+                return false; // If any error occurs during preparation, return false
+            }
+        }
+
+        private static void UnjoinConnectedWalls(Document document, Wall wall)
+        {
+            try
+            {
+                // Get all walls in the document
+                var allWalls = new FilteredElementCollector(document)
+                    .OfClass(typeof(Wall))
+                    .Cast<Wall>()
+                    .ToList();
+
+                // Check each wall for joins with our target wall
+                foreach (var otherWall in allWalls)
+                {
+                    if (otherWall.Id == wall.Id) continue;
+
+                    try
+                    {
+                        // Check if walls are joined and unjoin them
+                        if (WallUtils.IsWallJoinAllowedAtEnd(wall, 0) &&
+                            JoinGeometryUtils.AreElementsJoined(document, wall, otherWall))
+                        {
+                            JoinGeometryUtils.UnjoinGeometry(document, wall, otherWall);
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore individual unjoin failures
+                    }
+                }
+
+                // Also try to unjoin at both ends of the wall
+                try
+                {
+                    WallUtils.UnjoinWallsAtEnd(wall, 0);
+                }
+                catch { }
+
+                try
+                {
+                    WallUtils.UnjoinWallsAtEnd(wall, 1);
+                }
+                catch { }
+            }
+            catch
+            {
+                // If general unjoining fails, continue
+            }
+        }
+
+        private static void HandleHostedElements(Document document, Wall wall)
+        {
+            try
+            {
+                // Get all elements hosted by this wall
+                var hostedElements = new FilteredElementCollector(document)
+                    .WhereElementIsNotElementType()
+                    .Where(e => e.Host != null && e.Host.Id == wall.Id)
+                    .ToList();
+
+                var elementsToDelete = new List<ElementId>();
+
+                foreach (var hostedElement in hostedElements)
+                {
+                    // For doors and windows, we'll delete them as they can't be easily transferred
+                    if (hostedElement is FamilyInstance familyInstance)
+                    {
+                        var category = familyInstance.Category;
+                        if (category?.Id == new ElementId(BuiltInCategory.OST_Doors) ||
+                            category?.Id == new ElementId(BuiltInCategory.OST_Windows))
+                        {
+                            elementsToDelete.Add(hostedElement.Id);
+                        }
+                    }
+                }
+
+                // Delete hosted elements that would prevent wall deletion
+                if (elementsToDelete.Count > 0)
+                {
+                    document.Delete(elementsToDelete);
+                }
+            }
+            catch
+            {
+                // If hosted element handling fails, continue
+            }
+        }
+
+        private static bool IsWallInGroup(Wall wall)
+        {
+            try
+            {
+                return wall.GroupId != null && wall.GroupId != ElementId.InvalidElementId;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static string BuildLayerTypeKey(ElementId baseTypeId, CompoundStructureLayer layer, int index)
