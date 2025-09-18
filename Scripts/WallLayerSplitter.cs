@@ -215,18 +215,8 @@ namespace WallRvt.Scripts
                 double layerCenterOffset = CalculateLayerCenterOffset(layers, index, exteriorFaceOffset);
                 double offset = layerCenterOffset - referenceOffset;
 
-                // Calculate position to place layers adjacent to each other
-                double previousLayersWidth = 0;
-                for (int i = 0; i < index; i++)
-                {
-                    if (layers[i].Width > 0)
-                        previousLayersWidth += layers[i].Width;
-                }
-
-                double adjacentOffset = totalThickness / 2 + previousLayersWidth + (layer.Width / 2); // No spacing - layers touch each other
-                XYZ layerTranslation = wallOrientation.Multiply(adjacentOffset);
-                Transform transform = Transform.CreateTranslation(layerTranslation);
-                Curve translatedCurve = baseCurve.CreateTransformed(transform);
+                // Place all new layer walls at the exact same location as the original wall
+                Curve translatedCurve = baseCurve;
 
                 Wall newWall = CreateWallFromLayer(document, translatedCurve, layerType, baseLevelId, baseOffset,
                     topConstraintId, topOffset, unconnectedHeight, wall.Flipped, isStructural, locationLine);
@@ -235,12 +225,23 @@ namespace WallRvt.Scripts
                 createdWalls.Add(newWall.Id);
             }
 
-            // Success! New walls created for each layer
-            // Note: Original wall is left in place - user can manually delete it if desired
-            TaskDialog.Show("Wall Layer Splitter",
-                $"Successfully split wall {wall.Id.IntegerValue} into {createdWalls.Count} layer walls.\n\n" +
-                "The original wall has been left in place. You can manually delete it if no longer needed.\n" +
-                "The new layer walls are positioned adjacent to the original location.");
+            // Delete the original wall now that we have created all layer walls
+            try
+            {
+                PrepareWallForDeletion(document, wall);
+                document.Delete(wall.Id);
+
+                TaskDialog.Show("Wall Layer Splitter",
+                    $"Successfully split wall into {createdWalls.Count} layer walls.\n\n" +
+                    "The original wall has been replaced with individual layer walls at the same location.");
+            }
+            catch (Exception ex)
+            {
+                TaskDialog.Show("Wall Layer Splitter",
+                    $"Successfully created {createdWalls.Count} layer walls, but could not delete original wall.\n\n" +
+                    $"Error: {ex.Message}\n\n" +
+                    "You may need to manually delete the original wall.");
+            }
 
             return new WallSplitResult(wall.Id, createdWalls);
         }
