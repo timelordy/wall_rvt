@@ -195,7 +195,7 @@ namespace WallRvt.Scripts
             int locationLine = wall.get_Parameter(BuiltInParameter.WALL_KEY_REF_PARAM).AsInteger();
 
             IList<CompoundStructureLayer> layers = structure.GetLayers();
-            WallLocationLine wallLocationLine = ResolveWallLocationLine(locationLine);
+            WallLocationReference wallLocationLine = ResolveWallLocationLine(locationLine);
             double totalThickness = CalculateTotalThickness(layers);
             double exteriorFaceOffset = totalThickness / 2.0;
             double referenceOffset = CalculateReferenceOffset(structure, layers, wallLocationLine, exteriorFaceOffset);
@@ -299,21 +299,21 @@ namespace WallRvt.Scripts
         }
 
         private static double CalculateReferenceOffset(CompoundStructure structure, IList<CompoundStructureLayer> layers,
-            WallLocationLine wallLocationLine, double exteriorFaceOffset)
+            WallLocationReference wallLocationLine, double exteriorFaceOffset)
         {
             switch (wallLocationLine)
             {
-                case WallLocationLine.WallCenterline:
+                case WallLocationReference.WallCenterline:
                     return 0;
-                case WallLocationLine.FinishFaceExterior:
+                case WallLocationReference.FinishFaceExterior:
                     return exteriorFaceOffset;
-                case WallLocationLine.FinishFaceInterior:
+                case WallLocationReference.FinishFaceInterior:
                     return -exteriorFaceOffset;
-                case WallLocationLine.CoreFaceExterior:
+                case WallLocationReference.CoreFaceExterior:
                     return CalculateCoreFaceExteriorOffset(structure, layers, exteriorFaceOffset);
-                case WallLocationLine.CoreFaceInterior:
+                case WallLocationReference.CoreFaceInterior:
                     return CalculateCoreFaceInteriorOffset(structure, layers, exteriorFaceOffset);
-                case WallLocationLine.CoreCenterline:
+                case WallLocationReference.CoreCenterline:
                     return CalculateCoreCenterlineOffset(structure, layers, exteriorFaceOffset);
                 default:
                     return 0;
@@ -387,11 +387,21 @@ namespace WallRvt.Scripts
             return true;
         }
 
-        private static WallLocationLine ResolveWallLocationLine(int parameterValue)
+        private static WallLocationReference ResolveWallLocationLine(int parameterValue)
         {
-            return Enum.IsDefined(typeof(WallLocationLine), parameterValue)
-                ? (WallLocationLine)parameterValue
-                : WallLocationLine.WallCenterline;
+            return Enum.IsDefined(typeof(WallLocationReference), parameterValue)
+                ? (WallLocationReference)parameterValue
+                : WallLocationReference.WallCenterline;
+        }
+
+        private enum WallLocationReference
+        {
+            WallCenterline = 0,
+            CoreCenterline = 1,
+            FinishFaceExterior = 2,
+            FinishFaceInterior = 3,
+            CoreFaceExterior = 4,
+            CoreFaceInterior = 5
         }
 
         private static void SetStructuralMaterial(WallType wallType, ElementId materialId)
