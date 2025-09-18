@@ -7,11 +7,6 @@
     <AssemblyName>WallLayerSplitter</AssemblyName>
     <RootNamespace>WallRvt</RootNamespace>
   </PropertyGroup>
-
-  <ItemGroup>
-    <Compile Include="Scripts\WallLayerSplitter.cs" />
-  </ItemGroup>
-
   <ItemGroup>
     <Reference Include="RevitAPI">
       <HintPath>C:\\Program Files\\Autodesk\\Revit 2022\\RevitAPI.dll</HintPath>
