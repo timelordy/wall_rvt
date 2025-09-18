@@ -606,16 +606,25 @@ namespace WallRvt.Scripts
                             if (element?.Category != null)
                             {
                                 var categoryName = element.Category.Name;
-                                dependentByCategory[categoryName] = dependentByCategory.GetValueOrDefault(categoryName, 0) + 1;
+                                if (dependentByCategory.ContainsKey(categoryName))
+                                    dependentByCategory[categoryName]++;
+                                else
+                                    dependentByCategory[categoryName] = 1;
                             }
                             else
                             {
-                                dependentByCategory["Unknown"] = dependentByCategory.GetValueOrDefault("Unknown", 0) + 1;
+                                if (dependentByCategory.ContainsKey("Unknown"))
+                                    dependentByCategory["Unknown"]++;
+                                else
+                                    dependentByCategory["Unknown"] = 1;
                             }
                         }
                         catch
                         {
-                            dependentByCategory["Inaccessible"] = dependentByCategory.GetValueOrDefault("Inaccessible", 0) + 1;
+                            if (dependentByCategory.ContainsKey("Inaccessible"))
+                                dependentByCategory["Inaccessible"]++;
+                            else
+                                dependentByCategory["Inaccessible"] = 1;
                         }
                     }
 
