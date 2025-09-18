@@ -226,10 +226,12 @@ namespace WallRvt.Scripts
             }
 
             // Delete the original wall now that we have created all layer walls
+            bool wallDeleted = false;
             try
             {
                 PrepareWallForDeletion(document, wall);
                 document.Delete(wall.Id);
+                wallDeleted = true;
 
                 TaskDialog.Show("Wall Layer Splitter",
                     $"Successfully split wall into {createdWalls.Count} layer walls.\n\n" +
@@ -237,10 +239,35 @@ namespace WallRvt.Scripts
             }
             catch (Exception ex)
             {
-                TaskDialog.Show("Wall Layer Splitter",
-                    $"Successfully created {createdWalls.Count} layer walls, but could not delete original wall.\n\n" +
+                // Try asking user for permission to force deletion
+                TaskDialogResult result = TaskDialog.Show("Wall Layer Splitter",
+                    $"Successfully created {createdWalls.Count} layer walls, but the original wall has dependencies.\n\n" +
                     $"Error: {ex.Message}\n\n" +
-                    "You may need to manually delete the original wall.");
+                    "Would you like to try force deletion? This will break all connections and remove dependent elements.",
+                    TaskDialogCommonButtons.Yes | TaskDialogCommonButtons.No);
+
+                if (result == TaskDialogResult.Yes)
+                {
+                    try
+                    {
+                        ForceDeleteWall(document, wall);
+                        wallDeleted = true;
+                        TaskDialog.Show("Wall Layer Splitter",
+                            "Force deletion successful! The original wall has been removed.");
+                    }
+                    catch (Exception forceEx)
+                    {
+                        TaskDialog.Show("Wall Layer Splitter",
+                            $"Force deletion also failed: {forceEx.Message}\n\n" +
+                            "You may need to manually delete the original wall.");
+                    }
+                }
+                else
+                {
+                    TaskDialog.Show("Wall Layer Splitter",
+                        "Layer walls created successfully. The original wall remains in place.\n\n" +
+                        "You can manually delete it when ready.");
+                }
             }
 
             return new WallSplitResult(wall.Id, createdWalls);
@@ -303,6 +330,67 @@ namespace WallRvt.Scripts
                     $"Error during automatic processing of wall {wall.Id.IntegerValue}: {ex.Message}");
                 return false;
             }
+        }
+
+        private static void ForceDeleteWall(Document document, Wall wall)
+        {
+            // More aggressive deletion approach
+
+            // 1. Remove all connections more aggressively
+            try
+            {
+                // Disallow joins at both ends
+                WallUtils.DisallowWallJoinAtEnd(wall, 0);
+                WallUtils.DisallowWallJoinAtEnd(wall, 1);
+
+                // Unjoin from all possible elements
+                var allElements = new FilteredElementCollector(document).ToList();
+                foreach (var element in allElements)
+                {
+                    try
+                    {
+                        if (element.Id != wall.Id && JoinGeometryUtils.AreElementsJoined(document, wall, element))
+                        {
+                            JoinGeometryUtils.UnjoinGeometry(document, wall, element);
+                        }
+                    }
+                    catch { /* ignore */ }
+                }
+            }
+            catch { /* ignore */ }
+
+            // 2. Remove all hosted elements forcefully
+            try
+            {
+                var hostedElements = wall.FindInserts(true, true, true, true).ToList();
+                foreach (var elementId in hostedElements)
+                {
+                    try
+                    {
+                        document.Delete(elementId);
+                    }
+                    catch { /* ignore */ }
+                }
+            }
+            catch { /* ignore */ }
+
+            // 3. Remove all dependent elements using dependency set
+            try
+            {
+                var dependentIds = wall.GetDependentElements(null);
+                foreach (var depId in dependentIds)
+                {
+                    try
+                    {
+                        document.Delete(depId);
+                    }
+                    catch { /* ignore */ }
+                }
+            }
+            catch { /* ignore */ }
+
+            // 4. Final deletion attempt
+            document.Delete(wall.Id);
         }
 
         private static void ShowDetailedError(Wall wall, string mainMessage, List<string> diagnostics)
