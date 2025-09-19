@@ -202,15 +202,10 @@ namespace WallRvt.Scripts
             double totalThickness = CalculateTotalThickness(layers);
             double exteriorFaceOffset = totalThickness / 2.0;
             double referenceOffset = CalculateReferenceOffset(structure, layers, wallLocationLine, exteriorFaceOffset);
-            // Find a simple basic wall type to use for all layers
-            WallType basicWallType = new FilteredElementCollector(document)
-                .OfClass(typeof(WallType))
-                .Cast<WallType>()
-                .FirstOrDefault(wt => wt.Kind == WallKind.Basic);
-
-            if (basicWallType == null)
+            WallType baseWallType = wall.WallType;
+            if (baseWallType == null)
             {
-                TaskDialog.Show("Wall Layer Splitter Error", "No basic wall type found in document.");
+                TaskDialog.Show("Wall Layer Splitter Error", "Не удалось определить тип исходной стены.");
                 return null;
             }
 
@@ -241,10 +236,21 @@ namespace WallRvt.Scripts
                     Wall newWall = Wall.Create(document, offsetCurve, basicWallType.Id, baseLevelId,
                         unconnectedHeight, baseOffset, layerFlipped, isStructural);
 
-                    if (newWall != null)
+                    Wall newWall = CreateWallFromLayer(document, baseCurve, layerType, baseLevelId, baseOffset,
+                        topConstraintId, topOffset, unconnectedHeight, wall.Flipped, isStructural, locationLine);
+
+                    if (newWall == null)
                     {
-                        createdWalls.Add(newWall.Id);
+                        continue;
                     }
+
+                    if (newWall.WallType.Id != layerType.Id)
+                    {
+                        newWall.ChangeTypeId(layerType.Id);
+                    }
+
+                    CopyInstanceParameters(wall, newWall);
+                    createdWalls.Add(newWall.Id);
                 }
                 catch (Exception ex)
                 {
