@@ -1150,34 +1150,28 @@ namespace WallRvt.Scripts
                 detectedReasons.Add("стена входит в группу");
             }
 
-            ISet<int> detachedJoinedElementIds = new HashSet<int>();
-            if (!detectedReasons.Any())
-            {
-                detachedJoinedElementIds = DetachJoinedElements(document, wall);
-            }
-
             if (!detectedReasons.Any())
             {
                 ICollection<ElementId> dependentElements = wall.GetDependentElements(null);
                 if (dependentElements != null && dependentElements.Count > 0)
                 {
-                    int dependentInteger = dependentId.IntegerValue;
+                    List<string> blockingDescriptions = new List<string>();
 
-                    if (detachedFamilyIds != null && detachedFamilyIds.Contains(dependentInteger))
+                    foreach (ElementId dependentId in dependentElements)
                     {
-                        continue;
-                    }
-
-                    if (detachedJoinedElementIds.Contains(dependentInteger) ||
-                        blockedJoinedElementIds.Contains(dependentInteger))
-                    {
-                        int dependentIntegerId = dependentId.IntegerValue;
-                        if (detachedFamilyIds != null && detachedFamilyIds.Contains(dependentIntegerId))
+                        if (dependentId == null || dependentId == ElementId.InvalidElementId)
                         {
                             continue;
                         }
 
-                        if (detachedJoinedElementIds.Contains(dependentIntegerId))
+                        int dependentInteger = dependentId.IntegerValue;
+
+                        if (detachedFamilyIds != null && detachedFamilyIds.Contains(dependentInteger))
+                        {
+                            continue;
+                        }
+
+                        if (detachedJoinedElementIds.Contains(dependentInteger))
                         {
                             continue;
                         }
@@ -1193,8 +1187,9 @@ namespace WallRvt.Scripts
 
                     if (blockingDescriptions.Any())
                     {
-                        detectedReasons.Add("у стены остались зависимые элементы, которые блокируют удаление: " +
-                            string.Join(", ", blockingDescriptions));
+                        string blockingList = string.Join(", ", blockingDescriptions.Distinct());
+                        detectedReasons.Add(
+                            "у стены остались зависимые элементы, которые блокируют удаление: " + blockingList);
                     }
                 }
             }
