@@ -1294,7 +1294,7 @@ namespace WallRvt.Scripts
                 bool elementsJoined = true;
                 try
                 {
-                    elementsJoined = JoinGeometryUtils.AreElementsJoined(document, first.Id, second.Id);
+                    elementsJoined = JoinGeometryUtils.AreElementsJoined(document, first, second);
                 }
                 catch (Autodesk.Revit.Exceptions.ArgumentException)
                 {
@@ -1314,7 +1314,7 @@ namespace WallRvt.Scripts
 
                 try
                 {
-                    return !JoinGeometryUtils.AreElementsJoined(document, first.Id, second.Id);
+                    return !JoinGeometryUtils.AreElementsJoined(document, first, second);
                 }
                 catch (Autodesk.Revit.Exceptions.ArgumentException)
                 {
