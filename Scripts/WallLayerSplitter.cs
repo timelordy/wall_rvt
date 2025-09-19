@@ -928,16 +928,30 @@ namespace WallRvt.Scripts
                 return false;
             }
 
-            if (document.CanRemoveElement(wall.Id))
-            {
-                return true;
-            }
-
             List<string> detectedReasons = new List<string>();
 
-            if (wall.IsReadOnly || document.IsReadOnlyElement(wall.Id))
+            if (!document.IsModifiable)
             {
-                detectedReasons.Add("стена доступна только для чтения (например, находится в связанном файле или чужом рабочем наборе)");
+                detectedReasons.Add("документ открыт только для чтения — изменения в нём сейчас недоступны");
+            }
+
+            if (document.IsWorkshared)
+            {
+                CheckoutStatus checkoutStatus = WorksharingUtils.GetCheckoutStatus(document, wall.Id);
+                if (checkoutStatus != CheckoutStatus.OwnedByMe && checkoutStatus != CheckoutStatus.NotOwned)
+                {
+                    detectedReasons.Add("стена занята другим пользователем или находится в недоступном рабочем наборе");
+                }
+
+                WorksetId worksetId = wall.WorksetId;
+                if (worksetId != WorksetId.InvalidWorksetId)
+                {
+                    Workset workset = WorksetTable.GetWorkset(document, worksetId);
+                    if (workset != null && !workset.IsEditable)
+                    {
+                        detectedReasons.Add($"рабочий набор \"{workset.Name}\" не передан вам для редактирования");
+                    }
+                }
             }
 
             if (wall.Pinned)
@@ -950,9 +964,15 @@ namespace WallRvt.Scripts
                 detectedReasons.Add("стена входит в группу");
             }
 
+            ICollection<ElementId> dependentElements = wall.GetDependentElements(null);
+            if (dependentElements != null && dependentElements.Count > 0)
+            {
+                detectedReasons.Add("у стены есть зависимые элементы или ограничения (например, присоединённые перекрытия, крыши или элементы вариантов), которые блокируют удаление");
+            }
+
             if (!detectedReasons.Any())
             {
-                detectedReasons.Add("у стены есть зависимые элементы или ограничения (например, подключенные перекрытия, крыши или участие в вариантах проектирования), которые не позволяют удалить её автоматически");
+                return true;
             }
 
             reason = string.Join("; ", detectedReasons) + ".";
