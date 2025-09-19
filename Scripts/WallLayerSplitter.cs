@@ -1150,11 +1150,16 @@ namespace WallRvt.Scripts
                 detectedReasons.Add("стена входит в группу");
             }
 
-            ICollection<ElementId> dependentElements = wall.GetDependentElements(null);
-            if (dependentElements != null && dependentElements.Count > 0)
+            ISet<int> detachedJoinedElementIds = new HashSet<int>();
+            if (!detectedReasons.Any())
             {
-                List<string> blockingDescriptions = new List<string>();
-                foreach (ElementId dependentId in dependentElements)
+                detachedJoinedElementIds = DetachJoinedElements(document, wall);
+            }
+
+            if (!detectedReasons.Any())
+            {
+                ICollection<ElementId> dependentElements = wall.GetDependentElements(null);
+                if (dependentElements != null && dependentElements.Count > 0)
                 {
                     int dependentInteger = dependentId.IntegerValue;
 
@@ -1166,22 +1171,31 @@ namespace WallRvt.Scripts
                     if (detachedJoinedElementIds.Contains(dependentInteger) ||
                         blockedJoinedElementIds.Contains(dependentInteger))
                     {
-                        continue;
+                        int dependentIntegerId = dependentId.IntegerValue;
+                        if (detachedFamilyIds != null && detachedFamilyIds.Contains(dependentIntegerId))
+                        {
+                            continue;
+                        }
+
+                        if (detachedJoinedElementIds.Contains(dependentIntegerId))
+                        {
+                            continue;
+                        }
+
+                        Element dependent = document.GetElement(dependentId);
+                        if (dependent == null || !dependent.IsValidObject)
+                        {
+                            continue;
+                        }
+
+                        blockingDescriptions.Add(BuildElementDescription(dependent));
                     }
 
-                    Element dependent = document.GetElement(dependentId);
-                    if (dependent == null || !dependent.IsValidObject)
+                    if (blockingDescriptions.Any())
                     {
-                        continue;
+                        detectedReasons.Add("у стены остались зависимые элементы, которые блокируют удаление: " +
+                            string.Join(", ", blockingDescriptions));
                     }
-
-                    blockingDescriptions.Add(BuildElementDescription(dependent));
-                }
-
-                if (blockingDescriptions.Any())
-                {
-                    detectedReasons.Add("у стены остались зависимые элементы, которые блокируют удаление: " +
-                        string.Join(", ", blockingDescriptions));
                 }
             }
 
