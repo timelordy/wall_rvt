@@ -191,8 +191,29 @@ namespace WallRvt.Scripts
                 return null;
             }
 
-            if (!CanDeleteOriginalWall(document, wall, out string deleteRestrictionReason))
+            ICollection<ElementId> hostedFamilyIds =
+                wall.GetDependentElements(new ElementClassFilter(typeof(FamilyInstance)));
+
+            IList<ElementId> failedToDetachInstanceIds;
+            IList<FamilyInstance> detachedFamilyInstances = DetachHostedFamilyInstances(document, wall,
+                hostedFamilyIds, out failedToDetachInstanceIds);
+
+            HashSet<int> detachedFamilyIdSet = new HashSet<int>(detachedFamilyInstances
+                .Where(instance => instance != null)
+                .Select(instance => instance.Id.IntegerValue));
+
+            if (!CanDeleteOriginalWall(document, wall, detachedFamilyIdSet, out string deleteRestrictionReason))
             {
+                if (failedToDetachInstanceIds != null && failedToDetachInstanceIds.Any())
+                {
+                    string failedToDetachList = string.Join(", ", failedToDetachInstanceIds
+                        .Select(id => id.IntegerValue.ToString(CultureInfo.InvariantCulture)));
+                    deleteRestrictionReason = string.IsNullOrWhiteSpace(deleteRestrictionReason)
+                        ? $"не удалось временно отвязать семейства: {failedToDetachList}"
+                        : $"{deleteRestrictionReason}; не удалось временно отвязать семейства: {failedToDetachList}";
+                }
+
+                RestoreFamilyInstancesToHost(detachedFamilyInstances, wall);
                 ReportSkipReason(wall.Id, $"невозможно удалить исходную стену: {deleteRestrictionReason}");
                 return null;
             }
@@ -248,16 +269,11 @@ namespace WallRvt.Scripts
                 }
             }
 
-            IList<ElementId> rehostedInstances;
-            IList<ElementId> unmatchedInstances;
-
-            RehostFamilyInstances(document, wall, layerWallInfos, baseCurve, wallOrientation,
-                out rehostedInstances, out unmatchedInstances);
-
             if (!createdWalls.Any())
             {
                 TaskDialog.Show("Разделение слоев стен",
                     $"Не удалось создать новые стены для исходной стены {wall.Id.IntegerValue}. Исходная стена оставлена без изменений.");
+                RestoreFamilyInstancesToHost(detachedFamilyInstances, wall);
                 return null;
             }
 
@@ -267,28 +283,59 @@ namespace WallRvt.Scripts
             }
             catch (Autodesk.Revit.Exceptions.InvalidOperationException ex)
             {
+                RestoreFamilyInstancesToHost(detachedFamilyInstances, wall);
                 string errorMessage =
                     $"Не удалось удалить исходную стену (ID: {wall.Id.IntegerValue}). Возможно, на неё ссылаются другие элементы. Подробности: {ex.Message}";
                 throw new InvalidOperationException(errorMessage, ex);
             }
             catch (Autodesk.Revit.Exceptions.ArgumentException ex)
             {
+                RestoreFamilyInstancesToHost(detachedFamilyInstances, wall);
                 string errorMessage =
                     $"Не удалось удалить исходную стену (ID: {wall.Id.IntegerValue}). Подробности: {ex.Message}";
                 throw new InvalidOperationException(errorMessage, ex);
             }
             catch (Exception ex)
             {
+                RestoreFamilyInstancesToHost(detachedFamilyInstances, wall);
                 string errorMessage =
                     $"Не удалось удалить исходную стену (ID: {wall.Id.IntegerValue}). Подробности: {ex.Message}";
                 throw new InvalidOperationException(errorMessage, ex);
             }
 
-            TaskDialog.Show("Разделение слоев стен",
-                $"Стена {wall.Id.IntegerValue} успешно разделена на {createdWalls.Count} новых стен по слоям.\n\n" +
-                "Исходная стена удалена автоматически.");
+            IList<ElementId> rehostedInstances;
+            IList<ElementId> unmatchedInstances;
 
-            return new WallSplitResult(wall.Id, createdWalls, rehostedInstances, unmatchedInstances);
+            RehostFamilyInstances(document, layerWallInfos, baseCurve, wallOrientation, detachedFamilyInstances,
+                out rehostedInstances, out unmatchedInstances);
+
+            StringBuilder wallMessageBuilder = new StringBuilder();
+            wallMessageBuilder.AppendLine(
+                $"Стена {wall.Id.IntegerValue} успешно разделена на {createdWalls.Count} новых стен по слоям.");
+            if (rehostedInstances.Any())
+            {
+                wallMessageBuilder.AppendLine($"Перепривязано семейств: {rehostedInstances.Count}.");
+            }
+            if (unmatchedInstances.Any())
+            {
+                string unmatchedList = string.Join(", ",
+                    unmatchedInstances.Select(id => id.IntegerValue.ToString(CultureInfo.InvariantCulture)));
+                wallMessageBuilder.AppendLine($"Не удалось перепривязать автоматически: {unmatchedList}.");
+            }
+            if (failedToDetachInstanceIds != null && failedToDetachInstanceIds.Any())
+            {
+                string failedDetachList = string.Join(", ",
+                    failedToDetachInstanceIds.Select(id => id.IntegerValue.ToString(CultureInfo.InvariantCulture)));
+                wallMessageBuilder.AppendLine($"Не удалось временно отвязать: {failedDetachList}.");
+            }
+
+            wallMessageBuilder.AppendLine();
+            wallMessageBuilder.Append("Исходная стена удалена автоматически.");
+
+            TaskDialog.Show("Разделение слоев стен", wallMessageBuilder.ToString());
+
+            return new WallSplitResult(wall.Id, createdWalls, rehostedInstances, unmatchedInstances,
+                failedToDetachInstanceIds);
         }
 
 
@@ -673,31 +720,114 @@ namespace WallRvt.Scripts
             });
         }
 
-        private void RehostFamilyInstances(Document document, Wall originalWall, IList<LayerWallInfo> layerWalls,
-            Curve baseCurve, XYZ wallOrientation, out IList<ElementId> rehostedInstanceIds,
+        private static IList<FamilyInstance> DetachHostedFamilyInstances(Document document, Wall hostWall,
+            IEnumerable<ElementId> hostedFamilyIds, out IList<ElementId> failedToDetachInstanceIds)
+        {
+            failedToDetachInstanceIds = new List<ElementId>();
+            IList<FamilyInstance> detachedInstances = new List<FamilyInstance>();
+
+            if (document == null || hostWall == null || hostedFamilyIds == null)
+            {
+                return detachedInstances;
+            }
+
+            foreach (ElementId hostedId in hostedFamilyIds)
+            {
+                if (!(document.GetElement(hostedId) is FamilyInstance familyInstance))
+                {
+                    continue;
+                }
+
+                if (!IsHostedByWall(familyInstance, hostWall.Id))
+                {
+                    continue;
+                }
+
+                Parameter hostParameter = familyInstance.get_Parameter(BuiltInParameter.HOST_ID_PARAM);
+                if (hostParameter == null || hostParameter.IsReadOnly)
+                {
+                    failedToDetachInstanceIds.Add(hostedId);
+                    continue;
+                }
+
+                try
+                {
+                    bool result = hostParameter.Set(ElementId.InvalidElementId);
+                    if (result)
+                    {
+                        detachedInstances.Add(familyInstance);
+                    }
+                    else
+                    {
+                        failedToDetachInstanceIds.Add(hostedId);
+                    }
+                }
+                catch (Autodesk.Revit.Exceptions.InvalidOperationException)
+                {
+                    failedToDetachInstanceIds.Add(hostedId);
+                }
+                catch (Autodesk.Revit.Exceptions.ArgumentException)
+                {
+                    failedToDetachInstanceIds.Add(hostedId);
+                }
+            }
+
+            return detachedInstances;
+        }
+
+        private static void RestoreFamilyInstancesToHost(IEnumerable<FamilyInstance> familyInstances, Wall hostWall)
+        {
+            if (familyInstances == null || hostWall == null)
+            {
+                return;
+            }
+
+            foreach (FamilyInstance familyInstance in familyInstances)
+            {
+                if (familyInstance == null || !familyInstance.IsValidObject)
+                {
+                    continue;
+                }
+
+                TryRehostFamilyInstance(familyInstance, hostWall);
+            }
+        }
+
+        private static bool IsHostedByWall(FamilyInstance familyInstance, ElementId wallId)
+        {
+            if (familyInstance == null || wallId == null)
+            {
+                return false;
+            }
+
+            if (familyInstance.Host != null && familyInstance.Host.Id == wallId)
+            {
+                return true;
+            }
+
+            if (familyInstance.HostFace != null && familyInstance.HostFace.ElementId == wallId)
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private void RehostFamilyInstances(Document document, IList<LayerWallInfo> layerWalls, Curve baseCurve,
+            XYZ wallOrientation, IEnumerable<FamilyInstance> detachedInstances, out IList<ElementId> rehostedInstanceIds,
             out IList<ElementId> unmatchedInstanceIds)
         {
             rehostedInstanceIds = new List<ElementId>();
             unmatchedInstanceIds = new List<ElementId>();
 
-            if (layerWalls == null || !layerWalls.Any())
+            if (layerWalls == null || !layerWalls.Any() || detachedInstances == null)
             {
                 return;
             }
 
-#if REVIT_2024_OR_GREATER
-            ICollection<ElementId> hostedElementIds = HostObjectUtils.GetDirectlyHostedElements(document, originalWall.Id);
-#else
-            ICollection<ElementId> hostedElementIds = GetDirectlyHostedElementsLegacy(document, originalWall);
-#endif
-            if (hostedElementIds == null || hostedElementIds.Count == 0)
+            foreach (FamilyInstance familyInstance in detachedInstances)
             {
-                return;
-            }
-
-            foreach (ElementId hostedId in hostedElementIds)
-            {
-                if (!(document.GetElement(hostedId) is FamilyInstance familyInstance))
+                if (familyInstance == null || !familyInstance.IsValidObject)
                 {
                     continue;
                 }
@@ -705,41 +835,20 @@ namespace WallRvt.Scripts
                 LayerWallInfo targetLayer = SelectLayerForInstance(familyInstance, baseCurve, wallOrientation, layerWalls);
                 if (targetLayer == null)
                 {
-                    unmatchedInstanceIds.Add(hostedId);
+                    unmatchedInstanceIds.Add(familyInstance.Id);
                     continue;
                 }
 
                 if (TryRehostFamilyInstance(familyInstance, targetLayer.Wall))
                 {
-                    rehostedInstanceIds.Add(hostedId);
+                    rehostedInstanceIds.Add(familyInstance.Id);
                 }
                 else
                 {
-                    unmatchedInstanceIds.Add(hostedId);
+                    unmatchedInstanceIds.Add(familyInstance.Id);
                 }
             }
         }
-
-#if !REVIT_2024_OR_GREATER
-        private static ICollection<ElementId> GetDirectlyHostedElementsLegacy(Document document, Wall hostWall)
-        {
-            if (document == null || hostWall == null)
-            {
-                return new List<ElementId>();
-            }
-
-            IList<ElementId> directlyHosted = new FilteredElementCollector(document)
-                .OfClass(typeof(FamilyInstance))
-                .Cast<FamilyInstance>()
-                .Where(familyInstance =>
-                    (familyInstance.Host != null && familyInstance.Host.Id == hostWall.Id) ||
-                    (familyInstance.HostFace != null && familyInstance.HostFace.ElementId == hostWall.Id))
-                .Select(familyInstance => familyInstance.Id)
-                .ToList();
-
-            return directlyHosted;
-        }
-#endif
 
         private LayerWallInfo SelectLayerForInstance(FamilyInstance familyInstance, Curve baseCurve, XYZ wallOrientation,
             IList<LayerWallInfo> layerWalls)
@@ -874,35 +983,56 @@ namespace WallRvt.Scripts
             int totalCreated = 0;
             int totalRehosted = 0;
             int totalUnmatched = 0;
+            int totalFailedToDetach = 0;
 
             foreach (WallSplitResult result in results)
             {
                 int createdCount = result.CreatedWallIds.Count;
                 int rehostedCount = result.RehostedInstanceIds.Count;
                 int unmatchedCount = result.UnmatchedInstanceIds.Count;
+                int failedDetachCount = result.FailedToDetachInstanceIds.Count;
 
                 totalCreated += createdCount;
                 totalRehosted += rehostedCount;
                 totalUnmatched += unmatchedCount;
+                totalFailedToDetach += failedDetachCount;
 
                 builder.AppendLine(
                     $"- Стена {result.OriginalWallId.IntegerValue}: создано {createdCount} стен, перенесено семейств {rehostedCount}");
+
+                if (failedDetachCount > 0)
+                {
+                    string failedDetachList = string.Join(", ",
+                        result.FailedToDetachInstanceIds.Select(id => id.IntegerValue.ToString(CultureInfo.InvariantCulture)));
+                    builder.AppendLine($"  ⚠ Не удалось временно отвязать: {failedDetachList}");
+                }
 
                 if (unmatchedCount > 0)
                 {
                     string unmatchedList = string.Join(", ",
                         result.UnmatchedInstanceIds.Select(id => id.IntegerValue.ToString(CultureInfo.InvariantCulture)));
-                    builder.AppendLine($"  ⚠ Требуют ручной корректировки: {unmatchedList}");
+                    builder.AppendLine($"  ⚠ Не удалось перепривязать автоматически: {unmatchedList}");
                 }
             }
 
             builder.AppendLine($"Всего новых стен: {totalCreated}");
             builder.AppendLine($"Всего перенесённых семейств: {totalRehosted}");
 
+            if (totalFailedToDetach > 0)
+            {
+                builder.AppendLine($"Всего элементов, которые не удалось временно отвязать: {totalFailedToDetach}");
+            }
+
             if (totalUnmatched > 0)
             {
+                builder.AppendLine($"Всего элементов, требующих ручной перепривязки: {totalUnmatched}");
+            }
+
+            if (totalFailedToDetach > 0 || totalUnmatched > 0)
+            {
                 builder.AppendLine();
-                builder.AppendLine("Не все элементы удалось автоматически переназначить. Проверьте перечисленные идентификаторы.");
+                builder.AppendLine(
+                    "Не все элементы удалось обработать автоматически. Проверьте перечисленные идентификаторы и скорректируйте их вручную.");
             }
 
             string skipDetails = BuildSkipDetails(skippedMessages);
@@ -942,7 +1072,8 @@ namespace WallRvt.Scripts
             return builder.ToString().TrimEnd();
         }
 
-        private static bool CanDeleteOriginalWall(Document document, Wall wall, out string reason)
+        private static bool CanDeleteOriginalWall(Document document, Wall wall, ISet<int> detachedFamilyIds,
+            out string reason)
         {
             reason = string.Empty;
 
@@ -992,7 +1123,28 @@ namespace WallRvt.Scripts
             ICollection<ElementId> dependentElements = wall.GetDependentElements(null);
             if (dependentElements != null && dependentElements.Count > 0)
             {
-                detectedReasons.Add("у стены есть зависимые элементы или ограничения (например, присоединённые перекрытия, крыши или элементы вариантов), которые блокируют удаление");
+                List<string> blockingDescriptions = new List<string>();
+                foreach (ElementId dependentId in dependentElements)
+                {
+                    if (detachedFamilyIds != null && detachedFamilyIds.Contains(dependentId.IntegerValue))
+                    {
+                        continue;
+                    }
+
+                    Element dependent = document.GetElement(dependentId);
+                    if (dependent == null || !dependent.IsValidObject)
+                    {
+                        continue;
+                    }
+
+                    blockingDescriptions.Add(BuildElementDescription(dependent));
+                }
+
+                if (blockingDescriptions.Any())
+                {
+                    detectedReasons.Add("у стены остались зависимые элементы, которые блокируют удаление: " +
+                        string.Join(", ", blockingDescriptions));
+                }
             }
 
             if (!detectedReasons.Any())
@@ -1013,6 +1165,30 @@ namespace WallRvt.Scripts
 
             string statusName = checkoutStatus.ToString();
             return string.Equals(statusName, "OwnedByOtherUserInCurrentSession", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string BuildElementDescription(Element element)
+        {
+            if (element == null)
+            {
+                return "неизвестный элемент";
+            }
+
+            string categoryName = element.Category?.Name;
+            string elementName = element.Name;
+            string idValue = element.Id.IntegerValue.ToString(CultureInfo.InvariantCulture);
+
+            if (!string.IsNullOrWhiteSpace(categoryName) && !string.IsNullOrWhiteSpace(elementName))
+            {
+                return $"{categoryName} \"{elementName}\" (ID {idValue})";
+            }
+
+            if (!string.IsNullOrWhiteSpace(elementName))
+            {
+                return $"{elementName} (ID {idValue})";
+            }
+
+            return $"ID {idValue}";
         }
 
         private void ReportSkipReason(ElementId wallId, string reason)
@@ -1075,12 +1251,14 @@ namespace WallRvt.Scripts
         private class WallSplitResult
         {
             public WallSplitResult(ElementId originalWallId, IList<ElementId> createdWalls,
-                IList<ElementId> rehostedInstances, IList<ElementId> unmatchedInstances)
+                IList<ElementId> rehostedInstances, IList<ElementId> unmatchedInstances,
+                IList<ElementId> failedToDetachInstances)
             {
                 OriginalWallId = originalWallId;
                 CreatedWallIds = createdWalls ?? new List<ElementId>();
                 RehostedInstanceIds = rehostedInstances ?? new List<ElementId>();
                 UnmatchedInstanceIds = unmatchedInstances ?? new List<ElementId>();
+                FailedToDetachInstanceIds = failedToDetachInstances ?? new List<ElementId>();
             }
 
             public ElementId OriginalWallId { get; }
@@ -1090,6 +1268,8 @@ namespace WallRvt.Scripts
             public IList<ElementId> RehostedInstanceIds { get; }
 
             public IList<ElementId> UnmatchedInstanceIds { get; }
+
+            public IList<ElementId> FailedToDetachInstanceIds { get; }
         }
     }
 }
