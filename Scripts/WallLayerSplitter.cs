@@ -26,6 +26,7 @@ namespace WallRvt.Scripts
     {
         private readonly Dictionary<string, ElementId> _layerTypeCache = new Dictionary<string, ElementId>();
         private readonly List<string> _skipMessages = new List<string>();
+        private readonly List<string> _diagnosticLog = new List<string>();
 
         /// <inheritdoc />
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
@@ -39,6 +40,7 @@ namespace WallRvt.Scripts
 
             Document document = uiDocument.Document;
             _skipMessages.Clear();
+            _diagnosticLog.Clear();
 
             try
             {
@@ -1042,6 +1044,16 @@ namespace WallRvt.Scripts
                 builder.Append(skipDetails);
             }
 
+            if (_diagnosticLog.Any())
+            {
+                builder.AppendLine();
+                builder.AppendLine("Диагностический журнал проверки:");
+                foreach (string logEntry in _diagnosticLog)
+                {
+                    builder.AppendLine($"- {logEntry}");
+                }
+            }
+
             TaskDialog.Show("Разделение слоев стен", builder.ToString());
         }
 
@@ -1072,7 +1084,7 @@ namespace WallRvt.Scripts
             return builder.ToString().TrimEnd();
         }
 
-        private static bool CanDeleteOriginalWall(Document document, Wall wall, ISet<int> detachedFamilyIds,
+        private bool CanDeleteOriginalWall(Document document, Wall wall, ISet<int> detachedFamilyIds,
             out string reason)
         {
             reason = string.Empty;
@@ -1080,19 +1092,19 @@ namespace WallRvt.Scripts
             if (document == null || wall == null)
             {
                 reason = "не удалось получить данные стены.";
+                LogDiagnostic("Блокирующая проверка: не удалось получить данные стены.");
                 return false;
             }
 
             List<string> detectedReasons = new List<string>();
 
             HashSet<int> detachedJoinedElementIds = new HashSet<int>();
-            HashSet<int> blockedJoinedElementIds = new HashSet<int>();
             List<string> joinDetachFailures = new List<string>();
 
             if (document.IsModifiable)
             {
                 IList<ElementId> detachedJoinedElements = TryDetachJoinedElements(document, wall,
-                    joinDetachFailures, blockedJoinedElementIds);
+                    joinDetachFailures, null);
 
                 if (detachedJoinedElements != null)
                 {
@@ -1111,13 +1123,14 @@ namespace WallRvt.Scripts
             if (joinDetachFailures.Any())
             {
                 string failureList = string.Join(", ", joinDetachFailures.Distinct());
-                detectedReasons.Add(
+                AddBlockingReason(detectedReasons,
                     "не удалось разорвать соединение со следующими элементами: " + failureList);
             }
 
             if (!document.IsModifiable)
             {
-                detectedReasons.Add("документ открыт только для чтения — изменения в нём сейчас недоступны");
+                AddBlockingReason(detectedReasons,
+                    "документ открыт только для чтения — изменения в нём сейчас недоступны");
             }
 
             if (document.IsWorkshared)
@@ -1125,7 +1138,8 @@ namespace WallRvt.Scripts
                 CheckoutStatus checkoutStatus = WorksharingUtils.GetCheckoutStatus(document, wall.Id);
                 if (IsOwnedByAnotherUser(checkoutStatus))
                 {
-                    detectedReasons.Add("стена занята другим пользователем или находится в недоступном рабочем наборе");
+                    AddBlockingReason(detectedReasons,
+                        "стена занята другим пользователем или находится в недоступном рабочем наборе");
                 }
 
                 WorksetId worksetId = wall.WorksetId;
@@ -1135,19 +1149,82 @@ namespace WallRvt.Scripts
                     Workset workset = worksetTable.GetWorkset(worksetId);
                     if (workset != null && !workset.IsEditable)
                     {
-                        detectedReasons.Add($"рабочий набор \"{workset.Name}\" не передан вам для редактирования");
+                        AddBlockingReason(detectedReasons,
+                            $"рабочий набор \"{workset.Name}\" не передан вам для редактирования");
                     }
                 }
             }
 
             if (wall.Pinned)
             {
-                detectedReasons.Add("стена закреплена командой Pin");
+                AddBlockingReason(detectedReasons, "стена закреплена командой Pin");
             }
 
             if (wall.GroupId != ElementId.InvalidElementId)
             {
-                detectedReasons.Add("стена входит в группу");
+                AddBlockingReason(detectedReasons, "стена входит в группу");
+            }
+
+            ElementId designOptionId = GetDesignOptionId(wall);
+            ElementId activeDesignOptionId = ElementId.InvalidElementId;
+            try
+            {
+                activeDesignOptionId = document.ActiveDesignOptionId;
+            }
+            catch (Autodesk.Revit.Exceptions.InvalidOperationException)
+            {
+                activeDesignOptionId = ElementId.InvalidElementId;
+            }
+            if (designOptionId != ElementId.InvalidElementId && designOptionId != activeDesignOptionId)
+            {
+                string optionDescription = BuildDesignOptionDescription(document, designOptionId);
+                AddBlockingReason(detectedReasons,
+                    $"стена принадлежит неактивной дизайн-опции {optionDescription}");
+            }
+
+            ElementId assemblyId = wall.AssemblyInstanceId;
+            if (assemblyId != null && assemblyId != ElementId.InvalidElementId)
+            {
+                string assemblyDescription = BuildAssemblyDescription(document, assemblyId);
+                AddBlockingReason(detectedReasons, $"стена входит в сборку {assemblyDescription}");
+            }
+
+            bool hasAssociatedParts = false;
+            try
+            {
+                hasAssociatedParts = PartUtils.IsElementAssociatedWithParts(document, wall.Id);
+            }
+            catch (Autodesk.Revit.Exceptions.InvalidOperationException)
+            {
+                hasAssociatedParts = false;
+            }
+            catch (Autodesk.Revit.Exceptions.ArgumentException)
+            {
+                hasAssociatedParts = false;
+            }
+
+            if (hasAssociatedParts)
+            {
+                AddBlockingReason(detectedReasons, "стена разбита на части (Parts)");
+            }
+
+            Parameter phaseCreatedParameter = wall.get_Parameter(BuiltInParameter.WALL_PHASE_CREATED);
+            if (phaseCreatedParameter != null && phaseCreatedParameter.HasValue)
+            {
+                ElementId phaseCreatedId = phaseCreatedParameter.AsElementId();
+                if (phaseCreatedId != ElementId.InvalidElementId)
+                {
+                    ElementId activePhaseId = document.ActiveView != null
+                        ? document.ActiveView.PhaseId
+                        : ElementId.InvalidElementId;
+
+                    if (activePhaseId != ElementId.InvalidElementId && activePhaseId != phaseCreatedId)
+                    {
+                        string phaseDescription = BuildPhaseDescription(document, phaseCreatedId);
+                        AddBlockingReason(detectedReasons,
+                            $"стена создана в фазе {phaseDescription}, которая не совпадает с фазой активного вида");
+                    }
+                }
             }
 
             if (!detectedReasons.Any())
@@ -1193,7 +1270,7 @@ namespace WallRvt.Scripts
                     if (blockingDescriptions.Any())
                     {
                         string blockingList = string.Join(", ", blockingDescriptions.Distinct());
-                        detectedReasons.Add(
+                        AddBlockingReason(detectedReasons,
                             "у стены остались зависимые элементы, которые блокируют удаление: " + blockingList);
                     }
                 }
@@ -1204,7 +1281,7 @@ namespace WallRvt.Scripts
                 return true;
             }
 
-            reason = string.Join("; ", detectedReasons) + ".";
+            reason = string.Join("; ", detectedReasons);
             return false;
         }
 
@@ -1404,6 +1481,82 @@ namespace WallRvt.Scripts
             return $"ID {idValue}";
         }
 
+        private static ElementId GetDesignOptionId(Element element)
+        {
+            if (element == null)
+            {
+                return ElementId.InvalidElementId;
+            }
+
+            try
+            {
+                DesignOption designOption = element.DesignOption;
+                if (designOption != null)
+                {
+                    return designOption.Id;
+                }
+            }
+            catch (Autodesk.Revit.Exceptions.InvalidOperationException)
+            {
+                // Свойство DesignOption может быть недоступно для некоторых типов элементов в старых версиях API.
+                // В этом случае переходим к чтению параметра.
+            }
+
+            Parameter optionParameter = element.get_Parameter(BuiltInParameter.DESIGN_OPTION_ID);
+            return optionParameter != null ? optionParameter.AsElementId() : ElementId.InvalidElementId;
+        }
+
+        private static string BuildDesignOptionDescription(Document document, ElementId designOptionId)
+        {
+            if (document == null || designOptionId == null || designOptionId == ElementId.InvalidElementId)
+            {
+                int identifier = designOptionId != null ? designOptionId.IntegerValue : 0;
+                return $"ID {identifier}";
+            }
+
+            Element designOptionElement = document.GetElement(designOptionId);
+            if (designOptionElement is DesignOption designOption && !string.IsNullOrWhiteSpace(designOption.Name))
+            {
+                return $"\"{designOption.Name}\" (ID {designOptionId.IntegerValue})";
+            }
+
+            return $"ID {designOptionId.IntegerValue}";
+        }
+
+        private static string BuildAssemblyDescription(Document document, ElementId assemblyId)
+        {
+            if (document == null || assemblyId == null || assemblyId == ElementId.InvalidElementId)
+            {
+                int identifier = assemblyId != null ? assemblyId.IntegerValue : 0;
+                return $"ID {identifier}";
+            }
+
+            Element assemblyElement = document.GetElement(assemblyId);
+            if (assemblyElement is AssemblyInstance assembly && !string.IsNullOrWhiteSpace(assembly.Name))
+            {
+                return $"\"{assembly.Name}\" (ID {assemblyId.IntegerValue})";
+            }
+
+            return $"ID {assemblyId.IntegerValue}";
+        }
+
+        private static string BuildPhaseDescription(Document document, ElementId phaseId)
+        {
+            if (document == null || phaseId == null || phaseId == ElementId.InvalidElementId)
+            {
+                int identifier = phaseId != null ? phaseId.IntegerValue : 0;
+                return $"ID {identifier}";
+            }
+
+            Element phaseElement = document.GetElement(phaseId);
+            if (phaseElement is Phase phase && !string.IsNullOrWhiteSpace(phase.Name))
+            {
+                return $"\"{phase.Name}\" (ID {phaseId.IntegerValue})";
+            }
+
+            return $"ID {phaseId.IntegerValue}";
+        }
+
         private void ReportSkipReason(ElementId wallId, string reason)
         {
             if (wallId == null || string.IsNullOrWhiteSpace(reason))
@@ -1411,11 +1564,85 @@ namespace WallRvt.Scripts
                 return;
             }
 
-            string message = $"Стена {wallId.IntegerValue}: {reason}";
+            string formattedReason = FormatSkipReason(reason);
+            string message = formattedReason.Contains(Environment.NewLine)
+                ? $"Стена {wallId.IntegerValue}:{Environment.NewLine}{formattedReason}"
+                : $"Стена {wallId.IntegerValue}: {formattedReason}";
             if (!_skipMessages.Contains(message))
             {
                 _skipMessages.Add(message);
             }
+
+            LogDiagnostic($"Пропуск стены {wallId.IntegerValue}: {formattedReason.Replace(Environment.NewLine, " ")}");
+        }
+
+        private void AddBlockingReason(ICollection<string> detectedReasons, string reason)
+        {
+            if (detectedReasons == null || string.IsNullOrWhiteSpace(reason))
+            {
+                return;
+            }
+
+            string normalizedReason = reason.Trim();
+            if (!detectedReasons.Contains(normalizedReason))
+            {
+                detectedReasons.Add(normalizedReason);
+            }
+
+            LogDiagnostic($"Блокирующая проверка: {normalizedReason}");
+        }
+
+        private void LogDiagnostic(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return;
+            }
+
+            string timestamp = DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
+            string entry = $"[{timestamp}] {message}";
+            _diagnosticLog.Add(entry);
+            System.Diagnostics.Debug.WriteLine("[WallLayerSplitter] " + entry);
+        }
+
+        private static string FormatSkipReason(string reason)
+        {
+            if (string.IsNullOrWhiteSpace(reason))
+            {
+                return string.Empty;
+            }
+
+            string trimmedReason = reason.Trim().TrimEnd('.');
+            string[] parts = trimmedReason.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length <= 1)
+            {
+                return EnsureSentenceEnding(trimmedReason);
+            }
+
+            StringBuilder builder = new StringBuilder();
+            foreach (string part in parts)
+            {
+                string formattedPart = EnsureSentenceEnding(part.Trim());
+                builder.AppendLine($"• {formattedPart}");
+            }
+
+            return builder.ToString().TrimEnd();
+        }
+
+        private static string EnsureSentenceEnding(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            string trimmed = text.Trim();
+            if (!trimmed.EndsWith(".", StringComparison.Ordinal))
+            {
+                trimmed += ".";
+            }
+
+            return trimmed;
         }
 
         private class WallSelectionFilter : ISelectionFilter
