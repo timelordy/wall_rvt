@@ -712,68 +712,19 @@ namespace WallRvt.Scripts
         {
             if (document == null || hostWall == null)
             {
-                return Array.Empty<ElementId>();
+                return new List<ElementId>();
             }
 
-            ICollection<ElementId> allHostedElementIds = HostObjectUtils.GetAllHostedElements(document, hostWall.Id);
-            if (allHostedElementIds == null || allHostedElementIds.Count == 0)
-            {
-                return Array.Empty<ElementId>();
-            }
-
-            IList<ElementId> directlyHosted = new List<ElementId>();
-            foreach (ElementId hostedId in allHostedElementIds)
-            {
-                Element hostedElement = document.GetElement(hostedId);
-                if (hostedElement == null)
-                {
-                    continue;
-                }
-
-                if (IsElementDirectlyHostedOnWall(hostedElement, hostWall))
-                {
-                    directlyHosted.Add(hostedId);
-                }
-            }
+            IList<ElementId> directlyHosted = new FilteredElementCollector(document)
+                .OfClass(typeof(FamilyInstance))
+                .Cast<FamilyInstance>()
+                .Where(familyInstance =>
+                    (familyInstance.Host != null && familyInstance.Host.Id == hostWall.Id) ||
+                    (familyInstance.HostFace != null && familyInstance.HostFace.ElementId == hostWall.Id))
+                .Select(familyInstance => familyInstance.Id)
+                .ToList();
 
             return directlyHosted;
-        }
-
-        private static bool IsElementDirectlyHostedOnWall(Element hostedElement, Wall hostWall)
-        {
-            if (hostedElement == null || hostWall == null)
-            {
-                return false;
-            }
-
-            if (hostedElement is FamilyInstance familyInstance)
-            {
-                Element familyHost = familyInstance.Host;
-                if (familyHost != null && familyHost.Id == hostWall.Id)
-                {
-                    return true;
-                }
-
-                Reference hostFace = familyInstance.HostFace;
-                if (hostFace != null && hostFace.ElementId == hostWall.Id)
-                {
-                    return true;
-                }
-
-                return false;
-            }
-
-            Parameter hostParameter = hostedElement.get_Parameter(BuiltInParameter.HOST_ID_PARAM);
-            if (hostParameter != null && hostParameter.StorageType == StorageType.ElementId)
-            {
-                ElementId hostId = hostParameter.AsElementId();
-                if (hostId != null && hostId == hostWall.Id)
-                {
-                    return true;
-                }
-            }
-
-            return false;
         }
 #endif
 
