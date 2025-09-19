@@ -241,12 +241,39 @@ namespace WallRvt.Scripts
                 }
             }
 
-            // Successfully created all layer walls - no need to delete the original
-            TaskDialog.Show("Wall Layer Splitter",
-                $"Successfully split wall into {createdWalls.Count} individual layer walls.\n\n" +
-                $"Original wall ID: {wall.Id.IntegerValue}\n" +
-                $"New layer walls created: {createdWalls.Count}\n\n" +
-                "All walls are now placed at the same location. You can manually delete the original composite wall if desired.");
+            if (!createdWalls.Any())
+            {
+                TaskDialog.Show("Разделение слоев стен",
+                    $"Не удалось создать новые стены для исходной стены {wall.Id.IntegerValue}. Исходная стена оставлена без изменений.");
+                return null;
+            }
+
+            try
+            {
+                document.Delete(wall.Id);
+            }
+            catch (Autodesk.Revit.Exceptions.InvalidOperationException ex)
+            {
+                string errorMessage =
+                    $"Не удалось удалить исходную стену (ID: {wall.Id.IntegerValue}). Возможно, на неё ссылаются другие элементы. Подробности: {ex.Message}";
+                throw new InvalidOperationException(errorMessage, ex);
+            }
+            catch (Autodesk.Revit.Exceptions.ArgumentException ex)
+            {
+                string errorMessage =
+                    $"Не удалось удалить исходную стену (ID: {wall.Id.IntegerValue}). Подробности: {ex.Message}";
+                throw new InvalidOperationException(errorMessage, ex);
+            }
+            catch (Exception ex)
+            {
+                string errorMessage =
+                    $"Не удалось удалить исходную стену (ID: {wall.Id.IntegerValue}). Подробности: {ex.Message}";
+                throw new InvalidOperationException(errorMessage, ex);
+            }
+
+            TaskDialog.Show("Разделение слоев стен",
+                $"Стена {wall.Id.IntegerValue} успешно разделена на {createdWalls.Count} новых стен по слоям.\n\n" +
+                "Исходная стена удалена автоматически.");
 
             return new WallSplitResult(wall.Id, createdWalls);
         }
