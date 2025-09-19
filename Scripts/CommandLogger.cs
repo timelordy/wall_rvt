@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using Autodesk.Revit.UI;
@@ -6,111 +7,132 @@ using Autodesk.Revit.UI;
 namespace WallRvt.Scripts
 {
     /// <summary>
-    /// Простой логгер для записи диагностических сообщений команды.
+    /// Логгер для команд Revit, который записывает диагностику в файл и при необходимости
+    /// показывает сообщения в <see cref="TaskDialog"/>.
     /// </summary>
     /// <remarks>
-    /// Лог создаётся в каталоге временных файлов операционной системы и
-    /// предназначен для записи только в рамках одной сессии выполнения команды.
-    /// Все операции ввода-вывода безопасно обёрнуты в блоки try/catch, чтобы
-    /// логирование не влияло на основную бизнес-логику.
+    /// Экземпляр создаётся на время выполнения команды. Если файл открыть невозможно,
+    /// логгер продолжит работу в «беззвучном» режиме, чтобы диагностика не мешала основной логике.
     /// </remarks>
-    internal class CommandLogger
+    internal sealed class CommandLogger : IDisposable
     {
         private readonly object _syncRoot = new object();
-        private readonly string _logFilePath;
+        private readonly StreamWriter _writer;
         private readonly bool _mirrorToDialog;
+        private bool _disposed;
 
-        private CommandLogger(string logFilePath, bool mirrorToDialog)
+        private CommandLogger(StreamWriter writer, string logFilePath, bool mirrorToDialog, string sessionId)
         {
-            _logFilePath = logFilePath;
+            _writer = writer;
             _mirrorToDialog = mirrorToDialog;
+            LogFilePath = logFilePath;
+            SessionId = sessionId;
         }
 
         /// <summary>
-        /// Создаёт новый экземпляр логгера и подготавливает файл для записи.
+        /// Полный путь к файлу журнала. Может быть <c>null</c>, если файл создать не удалось.
         /// </summary>
-        /// <param name="logFileName">Имя файла журнала. Если не указано, создаётся имя с отметкой времени.</param>
-        /// <param name="mirrorToDialog">Если true, сообщения дублируются в окно TaskDialog.</param>
+        public string LogFilePath { get; }
+
+        /// <summary>
+        /// Идентификатор текущей сессии логирования.
+        /// </summary>
+        public string SessionId { get; }
+
+        /// <summary>
+        /// Создаёт логгер для конкретной команды.
+        /// </summary>
+        /// <param name="commandName">Имя команды (используется в заголовках и имени файла).</param>
+        /// <param name="mirrorToDialog">Если true, все сообщения дополнительно показываются в TaskDialog.</param>
         /// <returns>Экземпляр <see cref="CommandLogger"/>.</returns>
-        public static CommandLogger Create(string logFileName = null, bool mirrorToDialog = false)
+        public static CommandLogger CreateForCommand(string commandName, bool mirrorToDialog = false)
         {
-            string filePath = null;
+            string sessionId = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
+            StreamWriter writer = null;
+            string logFilePath = null;
 
             try
             {
+                string safeCommandName = string.IsNullOrWhiteSpace(commandName) ? "Command" : commandName.Trim();
+                string fileName = $"{safeCommandName}_{DateTime.Now:yyyyMMdd_HHmmssfff}.log";
                 string tempDirectory = Path.GetTempPath();
-                string fileName = string.IsNullOrWhiteSpace(logFileName)
-                    ? $"WallLayerSplitter_{DateTime.Now:yyyyMMdd_HHmmssfff}.log"
-                    : logFileName;
+                logFilePath = Path.Combine(tempDirectory, fileName);
 
-                filePath = Path.Combine(tempDirectory, fileName);
-
-                using (FileStream stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.Read))
-                using (StreamWriter writer = new StreamWriter(stream, Encoding.UTF8))
+                FileStream stream = new FileStream(logFilePath, FileMode.Create, FileAccess.Write, FileShare.Read);
+                writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false))
                 {
-                    writer.WriteLine($"[{DateTime.Now:O}] Старт новой сессии логирования.");
-                }
+                    AutoFlush = true
+                };
+
+                string header = $"{FormatTimestamp()} [{sessionId}] Старт сессии команды {safeCommandName}.";
+                writer.WriteLine(header);
             }
             catch (Exception)
             {
-                // Игнорируем любые проблемы с доступом к файловой системе.
-                filePath = null;
+                writer?.Dispose();
+                writer = null;
+                logFilePath = null;
             }
 
-            return new CommandLogger(filePath, mirrorToDialog);
+            return new CommandLogger(writer, logFilePath, mirrorToDialog, sessionId);
         }
 
         /// <summary>
         /// Записывает строку в журнал.
         /// </summary>
-        /// <param name="message">Сообщение.</param>
-        /// <param name="showDialog">Если true, сообщение дополнительно показывается в TaskDialog.</param>
+        /// <param name="message">Текст сообщения.</param>
+        /// <param name="showDialog">Показывать ли сообщение в TaskDialog независимо от настройки логгера.</param>
         public void Log(string message, bool showDialog = false)
         {
-            if (string.IsNullOrWhiteSpace(message))
+            if (_disposed || string.IsNullOrWhiteSpace(message))
             {
                 return;
             }
 
-            string formattedMessage = $"[{DateTime.Now:O}] {message}";
-
-            if (!string.IsNullOrWhiteSpace(_logFilePath))
-            {
-                try
-                {
-                    lock (_syncRoot)
-                    {
-                        File.AppendAllText(_logFilePath, formattedMessage + Environment.NewLine, Encoding.UTF8);
-                    }
-                }
-                catch (Exception)
-                {
-                    // Ошибки логирования игнорируются, чтобы не прерывать основной сценарий.
-                }
-            }
+            string formatted = $"{FormatTimestamp()} [{SessionId}] {message}";
+            WriteLineSafe(formatted);
 
             if (_mirrorToDialog || showDialog)
             {
-                try
-                {
-                    TaskDialog.Show("WallLayerSplitter", message);
-                }
-                catch (Exception)
-                {
-                    // Игнорируем ошибки при показе диалога (например, если API недоступно).
-                }
+                ShowDialogSafe(message);
             }
         }
 
         /// <summary>
-        /// Записывает информацию об исключении в журнал.
+        /// Форматирует строку по шаблону и записывает её в журнал.
         /// </summary>
-        /// <param name="message">Сопроводительный текст.</param>
-        /// <param name="exception">Исключение.</param>
-        public void LogException(string message, Exception exception)
+        public void LogFormat(string format, params object[] args)
         {
+            if (string.IsNullOrEmpty(format))
+            {
+                return;
+            }
+
+            string message = args == null || args.Length == 0
+                ? format
+                : string.Format(CultureInfo.InvariantCulture, format, args);
+
+            Log(message);
+        }
+
+        /// <summary>
+        /// Записывает сообщение и стек исключения.
+        /// </summary>
+        /// <param name="context">Контекст или сопроводительный текст.</param>
+        /// <param name="exception">Исключение.</param>
+        public void LogException(string context, Exception exception)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
             StringBuilder builder = new StringBuilder();
-            builder.AppendLine(message);
+
+            if (!string.IsNullOrWhiteSpace(context))
+            {
+                builder.AppendLine(context);
+            }
 
             if (exception != null)
             {
@@ -120,13 +142,65 @@ namespace WallRvt.Scripts
                 builder.AppendLine(exception.ToString());
             }
 
-            Log(builder.ToString());
+            Log(builder.ToString().TrimEnd());
         }
 
-        /// <summary>
-        /// Полный путь к файлу журнала или null, если журнал не используется.
-        /// </summary>
-        public string LogFilePath => _logFilePath;
+        /// <inheritdoc />
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+
+            try
+            {
+                WriteLineSafe($"{FormatTimestamp()} [{SessionId}] Завершение сессии логирования.");
+            }
+            finally
+            {
+                _writer?.Dispose();
+            }
+        }
+
+        private static string FormatTimestamp()
+        {
+            return DateTime.Now.ToString("O", CultureInfo.InvariantCulture);
+        }
+
+        private void WriteLineSafe(string line)
+        {
+            if (_writer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                lock (_syncRoot)
+                {
+                    _writer.WriteLine(line);
+                }
+            }
+            catch (Exception)
+            {
+                // Любые ошибки ввода-вывода игнорируются, чтобы не прерывать основную команду.
+            }
+        }
+
+        private static void ShowDialogSafe(string message)
+        {
+            try
+            {
+                TaskDialog.Show("WallLayerSplitter", message);
+            }
+            catch (Exception)
+            {
+                // Если TaskDialog недоступен (например, в контексте тестов), просто пропускаем показ.
+            }
+        }
     }
 }
 
