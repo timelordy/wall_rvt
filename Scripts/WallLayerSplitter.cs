@@ -202,15 +202,10 @@ namespace WallRvt.Scripts
             double totalThickness = CalculateTotalThickness(layers);
             double exteriorFaceOffset = totalThickness / 2.0;
             double referenceOffset = CalculateReferenceOffset(structure, layers, wallLocationLine, exteriorFaceOffset);
-            // Find a simple basic wall type to use for all layers
-            WallType basicWallType = new FilteredElementCollector(document)
-                .OfClass(typeof(WallType))
-                .Cast<WallType>()
-                .FirstOrDefault(wt => wt.Kind == WallKind.Basic);
-
-            if (basicWallType == null)
+            WallType baseWallType = wall.WallType;
+            if (baseWallType == null)
             {
-                TaskDialog.Show("Wall Layer Splitter Error", "No basic wall type found in document.");
+                TaskDialog.Show("Wall Layer Splitter Error", "Не удалось определить тип исходной стены.");
                 return null;
             }
 
@@ -224,14 +219,30 @@ namespace WallRvt.Scripts
 
                 try
                 {
-                    // Use the basic wall type for all layers - simple and safe
-                    Wall newWall = Wall.Create(document, baseCurve, basicWallType.Id, baseLevelId,
-                        unconnectedHeight, baseOffset, wall.Flipped, isStructural);
-
-                    if (newWall != null)
+                    WallType layerType = GetOrCreateLayerType(document, baseWallType, layer, index);
+                    CompoundStructure layerStructure = layerType.GetCompoundStructure();
+                    if (layerStructure == null || layerStructure.LayerCount != 1)
                     {
-                        createdWalls.Add(newWall.Id);
+                        TaskDialog.Show("Wall Layer Splitter Warning",
+                            $"Тип '{layerType.Name}' имеет {layerStructure?.LayerCount ?? 0} слоёв вместо одного.");
+                        continue;
                     }
+
+                    Wall newWall = CreateWallFromLayer(document, baseCurve, layerType, baseLevelId, baseOffset,
+                        topConstraintId, topOffset, unconnectedHeight, wall.Flipped, isStructural, locationLine);
+
+                    if (newWall == null)
+                    {
+                        continue;
+                    }
+
+                    if (newWall.WallType.Id != layerType.Id)
+                    {
+                        newWall.ChangeTypeId(layerType.Id);
+                    }
+
+                    CopyInstanceParameters(wall, newWall);
+                    createdWalls.Add(newWall.Id);
                 }
                 catch (Exception ex)
                 {
