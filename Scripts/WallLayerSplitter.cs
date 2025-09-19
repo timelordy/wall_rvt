@@ -80,10 +80,14 @@ namespace WallRvt.Scripts
                             if (!splitResults.Any())
                             {
                                 const string nothingProcessed = "Ни одна из выбранных стен не подошла для разделения.";
-                                TaskDialog.Show("Разделение слоев стен", nothingProcessed);
+                                string skipDetails = BuildSkipDetails(_skipMessages);
+                                string dialogText = string.IsNullOrWhiteSpace(skipDetails)
+                                    ? nothingProcessed
+                                    : $"{nothingProcessed}\n\n{skipDetails}";
+                                TaskDialog.Show("Разделение слоев стен", dialogText);
                                 transaction.RollBack();
                                 transactionGroup.RollBack();
-                                message = nothingProcessed;
+                                message = dialogText;
                                 return Result.Cancelled;
                             }
 
@@ -901,21 +905,41 @@ namespace WallRvt.Scripts
                 builder.AppendLine("Не все элементы удалось автоматически переназначить. Проверьте перечисленные идентификаторы.");
             }
 
-            if (skippedMessages != null)
+            string skipDetails = BuildSkipDetails(skippedMessages);
+            if (!string.IsNullOrWhiteSpace(skipDetails))
             {
-                IList<string> skippedList = skippedMessages.Where(message => !string.IsNullOrWhiteSpace(message)).ToList();
-                if (skippedList.Any())
-                {
-                    builder.AppendLine();
-                    builder.AppendLine("Стены, которые не удалось обработать:");
-                    foreach (string message in skippedList)
-                    {
-                        builder.AppendLine($"- {message}");
-                    }
-                }
+                builder.AppendLine();
+                builder.Append(skipDetails);
             }
 
             TaskDialog.Show("Разделение слоев стен", builder.ToString());
+        }
+
+        private static string BuildSkipDetails(IEnumerable<string> skippedMessages)
+        {
+            if (skippedMessages == null)
+            {
+                return string.Empty;
+            }
+
+            IList<string> skippedList = skippedMessages
+                .Where(message => !string.IsNullOrWhiteSpace(message))
+                .Distinct()
+                .ToList();
+
+            if (!skippedList.Any())
+            {
+                return string.Empty;
+            }
+
+            StringBuilder builder = new StringBuilder();
+            builder.AppendLine("Стены, которые не удалось обработать:");
+            foreach (string skipMessage in skippedList)
+            {
+                builder.AppendLine($"- {skipMessage}");
+            }
+
+            return builder.ToString().TrimEnd();
         }
 
         private static bool CanDeleteOriginalWall(Document document, Wall wall, out string reason)
