@@ -565,23 +565,36 @@ namespace WallRvt.Scripts
             return baseCurve.CreateTransformed(transform);
         }
 
-        private static readonly BuiltInParameter[] DefaultParametersToCopy =
+        private static readonly BuiltInParameter[] DefaultParametersToCopy = BuildDefaultParametersToCopy();
+
+        private static BuiltInParameter[] BuildDefaultParametersToCopy()
         {
-            BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS,
-            BuiltInParameter.ALL_MODEL_MARK,
-            BuiltInParameter.WALL_BASE_OFFSET,
-            BuiltInParameter.WALL_BASE_CONSTRAINT,
-            BuiltInParameter.WALL_TOP_OFFSET,
-            BuiltInParameter.WALL_HEIGHT_TYPE,
-            BuiltInParameter.WALL_USER_HEIGHT_PARAM,
-            BuiltInParameter.WALL_STRUCTURAL_SIGNIFICANT,
-            BuiltInParameter.WALL_ATTR_ROOM_BOUNDING,
-#if REVIT_2024_OR_GREATER
-            BuiltInParameter.WALL_FIRE_RATING_PARAM
-#else
-            BuiltInParameter.WALL_ATTR_FIRE_RATING
-#endif
-        };
+            List<BuiltInParameter> parameters = new List<BuiltInParameter>
+            {
+                BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS,
+                BuiltInParameter.ALL_MODEL_MARK,
+                BuiltInParameter.WALL_BASE_OFFSET,
+                BuiltInParameter.WALL_BASE_CONSTRAINT,
+                BuiltInParameter.WALL_TOP_OFFSET,
+                BuiltInParameter.WALL_HEIGHT_TYPE,
+                BuiltInParameter.WALL_USER_HEIGHT_PARAM,
+                BuiltInParameter.WALL_STRUCTURAL_SIGNIFICANT,
+                BuiltInParameter.WALL_ATTR_ROOM_BOUNDING,
+            };
+
+            TryAddBuiltInParameterByName(parameters, "WALL_FIRE_RATING_PARAM");
+            TryAddBuiltInParameterByName(parameters, "WALL_ATTR_FIRE_RATING");
+
+            return parameters.ToArray();
+        }
+
+        private static void TryAddBuiltInParameterByName(ICollection<BuiltInParameter> target, string parameterName)
+        {
+            if (Enum.TryParse(parameterName, out BuiltInParameter parsedParameter) && !target.Contains(parsedParameter))
+            {
+                target.Add(parsedParameter);
+            }
+        }
 
         private static void CopyInstanceParameters(Wall source, Wall target)
         {
