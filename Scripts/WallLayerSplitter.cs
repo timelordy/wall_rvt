@@ -1085,6 +1085,36 @@ namespace WallRvt.Scripts
 
             List<string> detectedReasons = new List<string>();
 
+            HashSet<int> detachedJoinedElementIds = new HashSet<int>();
+            HashSet<int> blockedJoinedElementIds = new HashSet<int>();
+            List<string> joinDetachFailures = new List<string>();
+
+            if (document.IsModifiable)
+            {
+                IList<ElementId> detachedJoinedElements = TryDetachJoinedElements(document, wall,
+                    joinDetachFailures, blockedJoinedElementIds);
+
+                if (detachedJoinedElements != null)
+                {
+                    foreach (ElementId detachedId in detachedJoinedElements)
+                    {
+                        if (detachedId == null)
+                        {
+                            continue;
+                        }
+
+                        detachedJoinedElementIds.Add(detachedId.IntegerValue);
+                    }
+                }
+            }
+
+            if (joinDetachFailures.Any())
+            {
+                string failureList = string.Join(", ", joinDetachFailures.Distinct());
+                detectedReasons.Add(
+                    "не удалось разорвать соединение со следующими элементами: " + failureList);
+            }
+
             if (!document.IsModifiable)
             {
                 detectedReasons.Add("документ открыт только для чтения — изменения в нём сейчас недоступны");
@@ -1131,8 +1161,15 @@ namespace WallRvt.Scripts
                 ICollection<ElementId> dependentElements = wall.GetDependentElements(null);
                 if (dependentElements != null && dependentElements.Count > 0)
                 {
-                    List<string> blockingDescriptions = new List<string>();
-                    foreach (ElementId dependentId in dependentElements)
+                    int dependentInteger = dependentId.IntegerValue;
+
+                    if (detachedFamilyIds != null && detachedFamilyIds.Contains(dependentInteger))
+                    {
+                        continue;
+                    }
+
+                    if (detachedJoinedElementIds.Contains(dependentInteger) ||
+                        blockedJoinedElementIds.Contains(dependentInteger))
                     {
                         int dependentIntegerId = dependentId.IntegerValue;
                         if (detachedFamilyIds != null && detachedFamilyIds.Contains(dependentIntegerId))
@@ -1171,68 +1208,83 @@ namespace WallRvt.Scripts
             return false;
         }
 
-        private static ISet<int> DetachJoinedElements(Document document, Wall wall)
+        private static IList<ElementId> TryDetachJoinedElements(Document document, Wall wall,
+            ICollection<string> failureDescriptions, ISet<int> blockedElementIds)
         {
-            ISet<int> detachedElementIds = new HashSet<int>();
+            IList<ElementId> detachedElements = new List<ElementId>();
 
             if (document == null || wall == null)
             {
-                return detachedElementIds;
+                return detachedElements;
             }
 
-            ICollection<ElementId> joinedElementIds;
+            ICollection<ElementId> joinedElements;
             try
             {
-                joinedElementIds = JoinGeometryUtils.GetJoinedElements(document, wall);
-            }
-            catch (Autodesk.Revit.Exceptions.InvalidOperationException)
-            {
-                return detachedElementIds;
+                joinedElements = JoinGeometryUtils.GetJoinedElements(document, wall);
             }
             catch (Autodesk.Revit.Exceptions.ArgumentException)
             {
-                return detachedElementIds;
+                return detachedElements;
+            }
+            catch (Autodesk.Revit.Exceptions.InvalidOperationException)
+            {
+                return detachedElements;
             }
 
-            if (joinedElementIds == null || joinedElementIds.Count == 0)
+            if (joinedElements == null || joinedElements.Count == 0)
             {
-                return detachedElementIds;
+                return detachedElements;
             }
 
-            foreach (ElementId joinedId in joinedElementIds)
+            foreach (ElementId joinedId in joinedElements.ToList())
             {
+                if (joinedId == null || joinedId == ElementId.InvalidElementId)
+                {
+                    continue;
+                }
+
                 Element joinedElement = document.GetElement(joinedId);
-                if (!CanDetachJoinedElement(joinedElement))
+                if (joinedElement == null || !joinedElement.IsValidObject)
                 {
                     continue;
                 }
 
-                bool detached = TryUnjoinGeometry(document, wall, joinedElement);
-                if (!detached)
+                if (!CanElementBeSafelyUnjoined(joinedElement))
                 {
+                    failureDescriptions?.Add(BuildElementDescription(joinedElement));
+                    blockedElementIds?.Add(joinedId.IntegerValue);
                     continue;
                 }
 
-                detachedElementIds.Add(joinedId.IntegerValue);
+                bool unjoined = TryUnjoinGeometry(document, wall, joinedElement);
+                if (!unjoined)
+                {
+                    failureDescriptions?.Add(BuildElementDescription(joinedElement));
+                    blockedElementIds?.Add(joinedId.IntegerValue);
+                    continue;
+                }
+
+                detachedElements.Add(joinedId);
 
                 if (joinedElement is Wall joinedWall)
                 {
-                    PreventWallRejoin(wall);
-                    PreventWallRejoin(joinedWall);
+                    TryDisallowWallJoinsAtBothEnds(wall);
+                    TryDisallowWallJoinsAtBothEnds(joinedWall);
                 }
             }
 
-            return detachedElementIds;
+            return detachedElements;
         }
 
-        private static bool CanDetachJoinedElement(Element element)
+        private static bool CanElementBeSafelyUnjoined(Element element)
         {
-            if (element == null || !element.IsValidObject)
+            if (element == null)
             {
                 return false;
             }
 
-            return element is Wall;
+            return element is HostObject;
         }
 
         private static bool TryUnjoinGeometry(Document document, Element first, Element second)
@@ -1244,12 +1296,39 @@ namespace WallRvt.Scripts
 
             try
             {
-                if (JoinGeometryUtils.AreElementsJoined(document, first, second))
+                bool elementsJoined = true;
+                try
                 {
-                    JoinGeometryUtils.UnjoinGeometry(document, first, second);
+                    elementsJoined = JoinGeometryUtils.AreElementsJoined(document, first.Id, second.Id);
+                }
+                catch (Autodesk.Revit.Exceptions.ArgumentException)
+                {
+                    elementsJoined = true;
+                }
+                catch (Autodesk.Revit.Exceptions.InvalidOperationException)
+                {
+                    elementsJoined = true;
                 }
 
-                return !JoinGeometryUtils.AreElementsJoined(document, first, second);
+                if (!elementsJoined)
+                {
+                    return true;
+                }
+
+                JoinGeometryUtils.UnjoinGeometry(document, first, second);
+
+                try
+                {
+                    return !JoinGeometryUtils.AreElementsJoined(document, first.Id, second.Id);
+                }
+                catch (Autodesk.Revit.Exceptions.ArgumentException)
+                {
+                    return true;
+                }
+                catch (Autodesk.Revit.Exceptions.InvalidOperationException)
+                {
+                    return true;
+                }
             }
             catch (Autodesk.Revit.Exceptions.InvalidOperationException)
             {
@@ -1261,33 +1340,32 @@ namespace WallRvt.Scripts
             }
         }
 
-        private static void PreventWallRejoin(Wall wall)
+        private static void TryDisallowWallJoinsAtBothEnds(Wall wall)
         {
             if (wall == null)
             {
                 return;
             }
 
-            TryDisallowWallJoinAtEnd(wall, 0);
-            TryDisallowWallJoinAtEnd(wall, 1);
-        }
-
-        private static void TryDisallowWallJoinAtEnd(Wall wall, int end)
-        {
-            if (wall == null)
+            for (int endIndex = 0; endIndex < 2; endIndex++)
             {
-                return;
-            }
-
-            try
-            {
-                WallUtils.DisallowWallJoinAtEnd(wall, end);
-            }
-            catch (Autodesk.Revit.Exceptions.InvalidOperationException)
-            {
-            }
-            catch (Autodesk.Revit.Exceptions.ArgumentException)
-            {
+                try
+                {
+                    if (WallUtils.IsWallJoinAllowedAtEnd(wall, endIndex))
+                    {
+                        WallUtils.DisallowWallJoinAtEnd(wall, endIndex);
+                    }
+                }
+                catch (Autodesk.Revit.Exceptions.InvalidOperationException)
+                {
+                    // Игнорируем исключение: если Revit не позволяет менять состояние соединения,
+                    // это не критично для основного процесса.
+                }
+                catch (Autodesk.Revit.Exceptions.ArgumentException)
+                {
+                    // Игнорируем исключение для совместимости с версиями API, где метод недоступен
+                    // для конкретного экземпляра.
+                }
             }
         }
 
