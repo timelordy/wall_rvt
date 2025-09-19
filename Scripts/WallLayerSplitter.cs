@@ -659,7 +659,7 @@ namespace WallRvt.Scripts
                 return;
             }
 
-            ICollection<ElementId> hostedElementIds = HostObjectUtils.GetHostedElements(document, originalWall.Id);
+            ICollection<ElementId> hostedElementIds = HostObjectUtils.GetDirectlyHostedElements(document, originalWall.Id);
             if (hostedElementIds == null || hostedElementIds.Count == 0)
             {
                 return;
