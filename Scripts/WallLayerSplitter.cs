@@ -1120,30 +1120,45 @@ namespace WallRvt.Scripts
                 detectedReasons.Add("стена входит в группу");
             }
 
-            ICollection<ElementId> dependentElements = wall.GetDependentElements(null);
-            if (dependentElements != null && dependentElements.Count > 0)
+            ISet<int> detachedJoinedElementIds = new HashSet<int>();
+            if (!detectedReasons.Any())
             {
-                List<string> blockingDescriptions = new List<string>();
-                foreach (ElementId dependentId in dependentElements)
+                detachedJoinedElementIds = DetachJoinedElements(document, wall);
+            }
+
+            if (!detectedReasons.Any())
+            {
+                ICollection<ElementId> dependentElements = wall.GetDependentElements(null);
+                if (dependentElements != null && dependentElements.Count > 0)
                 {
-                    if (detachedFamilyIds != null && detachedFamilyIds.Contains(dependentId.IntegerValue))
+                    List<string> blockingDescriptions = new List<string>();
+                    foreach (ElementId dependentId in dependentElements)
                     {
-                        continue;
+                        int dependentIntegerId = dependentId.IntegerValue;
+                        if (detachedFamilyIds != null && detachedFamilyIds.Contains(dependentIntegerId))
+                        {
+                            continue;
+                        }
+
+                        if (detachedJoinedElementIds.Contains(dependentIntegerId))
+                        {
+                            continue;
+                        }
+
+                        Element dependent = document.GetElement(dependentId);
+                        if (dependent == null || !dependent.IsValidObject)
+                        {
+                            continue;
+                        }
+
+                        blockingDescriptions.Add(BuildElementDescription(dependent));
                     }
 
-                    Element dependent = document.GetElement(dependentId);
-                    if (dependent == null || !dependent.IsValidObject)
+                    if (blockingDescriptions.Any())
                     {
-                        continue;
+                        detectedReasons.Add("у стены остались зависимые элементы, которые блокируют удаление: " +
+                            string.Join(", ", blockingDescriptions));
                     }
-
-                    blockingDescriptions.Add(BuildElementDescription(dependent));
-                }
-
-                if (blockingDescriptions.Any())
-                {
-                    detectedReasons.Add("у стены остались зависимые элементы, которые блокируют удаление: " +
-                        string.Join(", ", blockingDescriptions));
                 }
             }
 
@@ -1154,6 +1169,126 @@ namespace WallRvt.Scripts
 
             reason = string.Join("; ", detectedReasons) + ".";
             return false;
+        }
+
+        private static ISet<int> DetachJoinedElements(Document document, Wall wall)
+        {
+            ISet<int> detachedElementIds = new HashSet<int>();
+
+            if (document == null || wall == null)
+            {
+                return detachedElementIds;
+            }
+
+            ICollection<ElementId> joinedElementIds;
+            try
+            {
+                joinedElementIds = JoinGeometryUtils.GetJoinedElements(document, wall);
+            }
+            catch (Autodesk.Revit.Exceptions.InvalidOperationException)
+            {
+                return detachedElementIds;
+            }
+            catch (Autodesk.Revit.Exceptions.ArgumentException)
+            {
+                return detachedElementIds;
+            }
+
+            if (joinedElementIds == null || joinedElementIds.Count == 0)
+            {
+                return detachedElementIds;
+            }
+
+            foreach (ElementId joinedId in joinedElementIds)
+            {
+                Element joinedElement = document.GetElement(joinedId);
+                if (!CanDetachJoinedElement(joinedElement))
+                {
+                    continue;
+                }
+
+                bool detached = TryUnjoinGeometry(document, wall, joinedElement);
+                if (!detached)
+                {
+                    continue;
+                }
+
+                detachedElementIds.Add(joinedId.IntegerValue);
+
+                if (joinedElement is Wall joinedWall)
+                {
+                    PreventWallRejoin(wall);
+                    PreventWallRejoin(joinedWall);
+                }
+            }
+
+            return detachedElementIds;
+        }
+
+        private static bool CanDetachJoinedElement(Element element)
+        {
+            if (element == null || !element.IsValidObject)
+            {
+                return false;
+            }
+
+            return element is Wall;
+        }
+
+        private static bool TryUnjoinGeometry(Document document, Element first, Element second)
+        {
+            if (document == null || first == null || second == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                if (JoinGeometryUtils.AreElementsJoined(document, first, second))
+                {
+                    JoinGeometryUtils.UnjoinGeometry(document, first, second);
+                }
+
+                return !JoinGeometryUtils.AreElementsJoined(document, first, second);
+            }
+            catch (Autodesk.Revit.Exceptions.InvalidOperationException)
+            {
+                return false;
+            }
+            catch (Autodesk.Revit.Exceptions.ArgumentException)
+            {
+                return false;
+            }
+        }
+
+        private static void PreventWallRejoin(Wall wall)
+        {
+            if (wall == null)
+            {
+                return;
+            }
+
+            TryDisallowWallJoinAtEnd(wall, 0);
+            TryDisallowWallJoinAtEnd(wall, 1);
+        }
+
+        private static void TryDisallowWallJoinAtEnd(Wall wall, int end)
+        {
+            if (wall == null)
+            {
+                return;
+            }
+
+            try
+            {
+                WallUtils.DisallowWallJoinAtEnd(wall, end);
+            }
+            catch (Autodesk.Revit.Exceptions.InvalidOperationException)
+            {
+            }
+            catch (Autodesk.Revit.Exceptions.ArgumentException)
+            {
+            }
         }
 
         private static bool IsOwnedByAnotherUser(CheckoutStatus checkoutStatus)
