@@ -25,6 +25,7 @@ namespace WallRvt.Scripts
     public class WallLayerSplitter : IExternalCommand
     {
         private readonly Dictionary<string, ElementId> _layerTypeCache = new Dictionary<string, ElementId>();
+        private readonly List<string> _skipMessages = new List<string>();
 
         /// <inheritdoc />
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
@@ -37,6 +38,8 @@ namespace WallRvt.Scripts
             }
 
             Document document = uiDocument.Document;
+            _skipMessages.Clear();
+
             try
             {
                 IList<Wall> targetWalls = CollectTargetWalls(uiDocument).ToList();
@@ -98,7 +101,7 @@ namespace WallRvt.Scripts
                     }
                 }
 
-                ShowSummary(splitResults);
+                ShowSummary(splitResults, _skipMessages);
                 return Result.Succeeded;
             }
             catch (Exception ex) when (ex is RevitOperationCanceledException || ex is System.OperationCanceledException)
@@ -181,6 +184,12 @@ namespace WallRvt.Scripts
             LocationCurve locationCurve = wall.Location as LocationCurve;
             if (locationCurve == null)
             {
+                return null;
+            }
+
+            if (!CanDeleteOriginalWall(document, wall, out string deleteRestrictionReason))
+            {
+                ReportSkipReason(wall.Id, $"невозможно удалить исходную стену: {deleteRestrictionReason}");
                 return null;
             }
 
@@ -854,7 +863,7 @@ namespace WallRvt.Scripts
             return structure != null && structure.LayerCount > 1;
         }
 
-        private static void ShowSummary(IEnumerable<WallSplitResult> results)
+        private void ShowSummary(IEnumerable<WallSplitResult> results, IEnumerable<string> skippedMessages)
         {
             StringBuilder builder = new StringBuilder();
             builder.AppendLine("Результат разделения слоёв стен:");
@@ -892,7 +901,76 @@ namespace WallRvt.Scripts
                 builder.AppendLine("Не все элементы удалось автоматически переназначить. Проверьте перечисленные идентификаторы.");
             }
 
+            if (skippedMessages != null)
+            {
+                IList<string> skippedList = skippedMessages.Where(message => !string.IsNullOrWhiteSpace(message)).ToList();
+                if (skippedList.Any())
+                {
+                    builder.AppendLine();
+                    builder.AppendLine("Стены, которые не удалось обработать:");
+                    foreach (string message in skippedList)
+                    {
+                        builder.AppendLine($"- {message}");
+                    }
+                }
+            }
+
             TaskDialog.Show("Разделение слоев стен", builder.ToString());
+        }
+
+        private static bool CanDeleteOriginalWall(Document document, Wall wall, out string reason)
+        {
+            reason = string.Empty;
+
+            if (document == null || wall == null)
+            {
+                reason = "не удалось получить данные стены.";
+                return false;
+            }
+
+            if (document.CanRemoveElement(wall.Id))
+            {
+                return true;
+            }
+
+            List<string> detectedReasons = new List<string>();
+
+            if (wall.IsReadOnly || document.IsReadOnlyElement(wall.Id))
+            {
+                detectedReasons.Add("стена доступна только для чтения (например, находится в связанном файле или чужом рабочем наборе)");
+            }
+
+            if (wall.Pinned)
+            {
+                detectedReasons.Add("стена закреплена командой Pin");
+            }
+
+            if (wall.GroupId != ElementId.InvalidElementId)
+            {
+                detectedReasons.Add("стена входит в группу");
+            }
+
+            if (!detectedReasons.Any())
+            {
+                detectedReasons.Add("у стены есть зависимые элементы или ограничения (например, подключенные перекрытия, крыши или участие в вариантах проектирования), которые не позволяют удалить её автоматически");
+            }
+
+            reason = string.Join("; ", detectedReasons) + ".";
+            return false;
+        }
+
+        private void ReportSkipReason(ElementId wallId, string reason)
+        {
+            if (wallId == null || string.IsNullOrWhiteSpace(reason))
+            {
+                return;
+            }
+
+            string message = $"Стена {wallId.IntegerValue}: {reason}";
+            if (!_skipMessages.Contains(message))
+            {
+                _skipMessages.Add(message);
+            }
         }
 
         private class WallSelectionFilter : ISelectionFilter
