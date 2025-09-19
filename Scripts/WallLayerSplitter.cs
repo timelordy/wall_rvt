@@ -202,17 +202,9 @@ namespace WallRvt.Scripts
             double totalThickness = CalculateTotalThickness(layers);
             double exteriorFaceOffset = totalThickness / 2.0;
             double referenceOffset = CalculateReferenceOffset(structure, layers, wallLocationLine, exteriorFaceOffset);
-            // Find a simple basic wall type to use for all layers
-            WallType basicWallType = new FilteredElementCollector(document)
-                .OfClass(typeof(WallType))
-                .Cast<WallType>()
-                .FirstOrDefault(wt => wt.Kind == WallKind.Basic);
+            IList<LayerWallInfo> layerWallInfos = new List<LayerWallInfo>();
 
-            if (basicWallType == null)
-            {
-                TaskDialog.Show("Wall Layer Splitter Error", "No basic wall type found in document.");
-                return null;
-            }
+            const double offsetTolerance = 1e-9;
 
             for (int index = 0; index < layers.Count; index++)
             {
@@ -224,20 +216,29 @@ namespace WallRvt.Scripts
 
                 try
                 {
-                    // Use the basic wall type for all layers - simple and safe
-                    Wall newWall = Wall.Create(document, baseCurve, basicWallType.Id, baseLevelId,
-                        unconnectedHeight, baseOffset, wall.Flipped, isStructural);
 
-                    if (newWall != null)
-                    {
+                    WallType layerType = GetOrCreateLayerType(document, wall.WallType, layer, index);
+                    double layerCenterOffset = CalculateLayerCenterOffset(layers, index, exteriorFaceOffset);
+                    double layerOffsetFromReference = referenceOffset + layerCenterOffset;
+                    Curve offsetCurve = CreateOffsetCurve(baseCurve, wallOrientation, layerOffsetFromReference);
+
+                    Wall newWall = CreateWallFromLayer(document, offsetCurve, layerType, baseLevelId, baseOffset,
+                        topConstraintId, topOffset, unconnectedHeight, wall.Flipped, isStructural, locationLine);
+
+                    if (newWall.WallType.Id != layerType.Id)
+                    
+                        CopyInstanceParameters(wall, newWall);
                         createdWalls.Add(newWall.Id);
+                        layerWallInfos.Add(new LayerWallInfo(newWall, layer, index, layerOffsetFromReference));
                     }
+
+                    CopyInstanceParameters(wall, newWall);
+                    createdWalls.Add(newWall.Id);
                 }
                 catch (Exception ex)
                 {
-                    // Just skip this layer and continue
-                    TaskDialog.Show("Wall Layer Splitter Warning",
-                        $"Skipped layer {index + 1}: {ex.Message}");
+                    TaskDialog.Show("Разделение слоев стен",
+                        $"Не удалось создать стену для слоя {index + 1}: {ex.Message}");
                 }
             }
 
@@ -275,7 +276,7 @@ namespace WallRvt.Scripts
                 $"Стена {wall.Id.IntegerValue} успешно разделена на {createdWalls.Count} новых стен по слоям.\n\n" +
                 "Исходная стена удалена автоматически.");
 
-            return new WallSplitResult(wall.Id, createdWalls);
+            return new WallSplitResult(wall.Id, createdWalls, rehostedInstances, unmatchedInstances);
         }
 
 
@@ -553,44 +554,237 @@ namespace WallRvt.Scripts
             return newWall;
         }
 
+        private static Curve CreateOffsetCurve(Curve baseCurve, XYZ wallOrientation, double offset)
+        {
+            if (Math.Abs(offset) < 1e-9)
+            {
+                return baseCurve;
+            }
+
+            XYZ translation = wallOrientation.Multiply(offset);
+            Transform transform = Transform.CreateTranslation(translation);
+            return baseCurve.CreateTransformed(transform);
+        }
+
+        private static readonly BuiltInParameter[] DefaultParametersToCopy =
+        {
+            BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS,
+            BuiltInParameter.ALL_MODEL_MARK,
+            BuiltInParameter.WALL_BASE_OFFSET,
+            BuiltInParameter.WALL_BASE_CONSTRAINT,
+            BuiltInParameter.WALL_TOP_OFFSET,
+            BuiltInParameter.WALL_HEIGHT_TYPE,
+            BuiltInParameter.WALL_USER_HEIGHT_PARAM,
+            BuiltInParameter.WALL_STRUCTURAL_SIGNIFICANT,
+            BuiltInParameter.WALL_ATTR_ROOM_BOUNDING,
+            BuiltInParameter.WALL_ATTR_FIRE_RATING
+        };
+
         private static void CopyInstanceParameters(Wall source, Wall target)
         {
-            IList<BuiltInParameter> parametersToCopy = new List<BuiltInParameter>
-            {
-                BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS,
-                BuiltInParameter.ALL_MODEL_MARK,
-                BuiltInParameter.WALL_BASE_OFFSET,
-                BuiltInParameter.WALL_TOP_OFFSET,
-                BuiltInParameter.WALL_STRUCTURAL_SIGNIFICANT
-            };
-
-            foreach (BuiltInParameter builtInParameter in parametersToCopy)
+            foreach (BuiltInParameter builtInParameter in DefaultParametersToCopy)
             {
                 Parameter sourceParameter = source.get_Parameter(builtInParameter);
                 Parameter targetParameter = target.get_Parameter(builtInParameter);
-                if (sourceParameter == null || targetParameter == null)
+                CopyParameterValue(sourceParameter, targetParameter);
+            }
+
+            foreach (Parameter sourceParameter in source.Parameters.Cast<Parameter>())
+            {
+                if (sourceParameter == null || sourceParameter.IsReadOnly)
                 {
                     continue;
                 }
 
-                TrySetParameter(targetParameter, () =>
+                Definition definition = sourceParameter.Definition;
+                if (definition == null)
                 {
-                    switch (sourceParameter.StorageType)
-                    {
-                        case StorageType.Double:
-                            targetParameter.Set(sourceParameter.AsDouble());
-                            break;
-                        case StorageType.Integer:
-                            targetParameter.Set(sourceParameter.AsInteger());
-                            break;
-                        case StorageType.String:
-                            targetParameter.Set(sourceParameter.AsString());
-                            break;
-                        case StorageType.ElementId:
-                            targetParameter.Set(sourceParameter.AsElementId());
-                            break;
-                    }
-                });
+                    continue;
+                }
+
+                Parameter targetParameter = target.get_Parameter(definition);
+                if (targetParameter == null || targetParameter.IsReadOnly)
+                {
+                    continue;
+                }
+
+                if (sourceParameter.StorageType != targetParameter.StorageType)
+                {
+                    continue;
+                }
+
+                CopyParameterValue(sourceParameter, targetParameter);
+            }
+        }
+
+        private static void CopyParameterValue(Parameter sourceParameter, Parameter targetParameter)
+        {
+            if (sourceParameter == null || targetParameter == null)
+            {
+                return;
+            }
+
+            TrySetParameter(targetParameter, () =>
+            {
+                switch (sourceParameter.StorageType)
+                {
+                    case StorageType.Double:
+                        targetParameter.Set(sourceParameter.AsDouble());
+                        break;
+                    case StorageType.Integer:
+                        targetParameter.Set(sourceParameter.AsInteger());
+                        break;
+                    case StorageType.String:
+                        targetParameter.Set(sourceParameter.AsString());
+                        break;
+                    case StorageType.ElementId:
+                        targetParameter.Set(sourceParameter.AsElementId());
+                        break;
+                }
+            });
+        }
+
+        private void RehostFamilyInstances(Document document, Wall originalWall, IList<LayerWallInfo> layerWalls,
+            Curve baseCurve, XYZ wallOrientation, out IList<ElementId> rehostedInstanceIds,
+            out IList<ElementId> unmatchedInstanceIds)
+        {
+            rehostedInstanceIds = new List<ElementId>();
+            unmatchedInstanceIds = new List<ElementId>();
+
+            if (layerWalls == null || !layerWalls.Any())
+            {
+                return;
+            }
+
+            ICollection<ElementId> hostedElementIds = HostObjectUtils.GetHostedElements(document, originalWall.Id);
+            if (hostedElementIds == null || hostedElementIds.Count == 0)
+            {
+                return;
+            }
+
+            foreach (ElementId hostedId in hostedElementIds)
+            {
+                if (!(document.GetElement(hostedId) is FamilyInstance familyInstance))
+                {
+                    continue;
+                }
+
+                LayerWallInfo targetLayer = SelectLayerForInstance(familyInstance, baseCurve, wallOrientation, layerWalls);
+                if (targetLayer == null)
+                {
+                    unmatchedInstanceIds.Add(hostedId);
+                    continue;
+                }
+
+                if (TryRehostFamilyInstance(familyInstance, targetLayer.Wall))
+                {
+                    rehostedInstanceIds.Add(hostedId);
+                }
+                else
+                {
+                    unmatchedInstanceIds.Add(hostedId);
+                }
+            }
+        }
+
+        private LayerWallInfo SelectLayerForInstance(FamilyInstance familyInstance, Curve baseCurve, XYZ wallOrientation,
+            IList<LayerWallInfo> layerWalls)
+        {
+            const double tolerance = 1e-6;
+            double? offset = TryGetInstanceOffset(familyInstance, baseCurve, wallOrientation);
+            if (offset.HasValue)
+            {
+                LayerWallInfo matchedLayer = layerWalls
+                    .Where(info => info.ContainsOffset(offset.Value, tolerance))
+                    .OrderBy(info => Math.Abs(info.CenterOffset - offset.Value))
+                    .FirstOrDefault();
+
+                if (matchedLayer != null)
+                {
+                    return matchedLayer;
+                }
+            }
+
+            return ChooseLayerByFunction(layerWalls);
+        }
+
+        private static double? TryGetInstanceOffset(FamilyInstance familyInstance, Curve referenceCurve, XYZ wallOrientation)
+        {
+            if (familyInstance == null || referenceCurve == null || wallOrientation == null)
+            {
+                return null;
+            }
+
+            if (familyInstance.Location is LocationPoint locationPoint)
+            {
+                return ProjectOffset(locationPoint.Point, referenceCurve, wallOrientation);
+            }
+
+            if (familyInstance.Location is LocationCurve locationCurve)
+            {
+                XYZ midpoint = locationCurve.Curve?.Evaluate(0.5, true);
+                return ProjectOffset(midpoint, referenceCurve, wallOrientation);
+            }
+
+            return null;
+        }
+
+        private static double? ProjectOffset(XYZ point, Curve referenceCurve, XYZ wallOrientation)
+        {
+            if (point == null)
+            {
+                return null;
+            }
+
+            IntersectionResult projection = referenceCurve.Project(point);
+            if (projection == null)
+            {
+                return null;
+            }
+
+            XYZ difference = point - projection.XYZPoint;
+            return difference.DotProduct(wallOrientation);
+        }
+
+        private static LayerWallInfo ChooseLayerByFunction(IList<LayerWallInfo> layerWalls)
+        {
+            LayerWallInfo structuralLayer = layerWalls
+                .FirstOrDefault(info => info.Layer.Function == MaterialFunctionAssignment.Structure);
+            if (structuralLayer != null)
+            {
+                return structuralLayer;
+            }
+
+            return layerWalls
+                .OrderByDescending(info => info.Layer.Width)
+                .FirstOrDefault();
+        }
+
+        private static bool TryRehostFamilyInstance(FamilyInstance familyInstance, Wall newHost)
+        {
+            if (familyInstance == null || newHost == null)
+            {
+                return false;
+            }
+
+            Parameter hostParameter = familyInstance.get_Parameter(BuiltInParameter.HOST_ID_PARAM);
+            if (hostParameter == null || hostParameter.IsReadOnly)
+            {
+                return false;
+            }
+
+            try
+            {
+                bool result = hostParameter.Set(newHost.Id);
+                return result;
+            }
+            catch (Autodesk.Revit.Exceptions.InvalidOperationException)
+            {
+                return false;
+            }
+            catch (Autodesk.Revit.Exceptions.ArgumentException)
+            {
+                return false;
             }
         }
 
@@ -624,15 +818,39 @@ namespace WallRvt.Scripts
             StringBuilder builder = new StringBuilder();
             builder.AppendLine("Результат разделения слоёв стен:");
             int totalCreated = 0;
+            int totalRehosted = 0;
+            int totalUnmatched = 0;
 
             foreach (WallSplitResult result in results)
             {
                 int createdCount = result.CreatedWallIds.Count;
+                int rehostedCount = result.RehostedInstanceIds.Count;
+                int unmatchedCount = result.UnmatchedInstanceIds.Count;
+
                 totalCreated += createdCount;
-                builder.AppendLine($"- Стена {result.OriginalWallId.IntegerValue}: создано {createdCount} стен");
+                totalRehosted += rehostedCount;
+                totalUnmatched += unmatchedCount;
+
+                builder.AppendLine(
+                    $"- Стена {result.OriginalWallId.IntegerValue}: создано {createdCount} стен, перенесено семейств {rehostedCount}");
+
+                if (unmatchedCount > 0)
+                {
+                    string unmatchedList = string.Join(", ",
+                        result.UnmatchedInstanceIds.Select(id => id.IntegerValue.ToString(CultureInfo.InvariantCulture)));
+                    builder.AppendLine($"  ⚠ Требуют ручной корректировки: {unmatchedList}");
+                }
             }
 
             builder.AppendLine($"Всего новых стен: {totalCreated}");
+            builder.AppendLine($"Всего перенесённых семейств: {totalRehosted}");
+
+            if (totalUnmatched > 0)
+            {
+                builder.AppendLine();
+                builder.AppendLine("Не все элементы удалось автоматически переназначить. Проверьте перечисленные идентификаторы.");
+            }
+
             TaskDialog.Show("Разделение слоев стен", builder.ToString());
         }
 
@@ -646,17 +864,57 @@ namespace WallRvt.Scripts
             public bool AllowReference(Reference reference, XYZ position) => false;
         }
 
+        private class LayerWallInfo
+        {
+            public LayerWallInfo(Wall wall, CompoundStructureLayer layer, int index, double centerOffset)
+            {
+                Wall = wall;
+                Layer = layer;
+                Index = index;
+                CenterOffset = centerOffset;
+                HalfWidth = layer.Width / 2.0;
+            }
+
+            public Wall Wall { get; }
+
+            public CompoundStructureLayer Layer { get; }
+
+            public int Index { get; }
+
+            public double CenterOffset { get; }
+
+            private double HalfWidth { get; }
+
+            private double StartOffset => CenterOffset - HalfWidth;
+
+            private double EndOffset => CenterOffset + HalfWidth;
+
+            public ElementId WallId => Wall.Id;
+
+            public bool ContainsOffset(double offset, double tolerance)
+            {
+                return offset >= StartOffset - tolerance && offset <= EndOffset + tolerance;
+            }
+        }
+
         private class WallSplitResult
         {
-            public WallSplitResult(ElementId originalWallId, IList<ElementId> createdWalls)
+            public WallSplitResult(ElementId originalWallId, IList<ElementId> createdWalls,
+                IList<ElementId> rehostedInstances, IList<ElementId> unmatchedInstances)
             {
                 OriginalWallId = originalWallId;
-                CreatedWallIds = createdWalls;
+                CreatedWallIds = createdWalls ?? new List<ElementId>();
+                RehostedInstanceIds = rehostedInstances ?? new List<ElementId>();
+                UnmatchedInstanceIds = unmatchedInstances ?? new List<ElementId>();
             }
 
             public ElementId OriginalWallId { get; }
 
             public IList<ElementId> CreatedWallIds { get; }
+
+            public IList<ElementId> RehostedInstanceIds { get; }
+
+            public IList<ElementId> UnmatchedInstanceIds { get; }
         }
     }
 }
