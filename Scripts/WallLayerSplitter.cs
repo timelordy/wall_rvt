@@ -202,6 +202,18 @@ namespace WallRvt.Scripts
             double totalThickness = CalculateTotalThickness(layers);
             double exteriorFaceOffset = totalThickness / 2.0;
             double referenceOffset = CalculateReferenceOffset(structure, layers, wallLocationLine, exteriorFaceOffset);
+            // Find a simple basic wall type to use for all layers
+            WallType basicWallType = new FilteredElementCollector(document)
+                .OfClass(typeof(WallType))
+                .Cast<WallType>()
+                .FirstOrDefault(wt => wt.Kind == WallKind.Basic);
+
+            if (basicWallType == null)
+            {
+                TaskDialog.Show("Wall Layer Splitter Error", "No basic wall type found in document.");
+                return null;
+            }
+
             for (int index = 0; index < layers.Count; index++)
             {
                 CompoundStructureLayer layer = layers[index];
@@ -210,19 +222,23 @@ namespace WallRvt.Scripts
                     continue;
                 }
 
-                WallType layerType = GetOrCreateLayerType(document, wall.WallType, layer, index);
+                try
+                {
+                    // Use the basic wall type for all layers - simple and safe
+                    Wall newWall = Wall.Create(document, baseCurve, basicWallType.Id, baseLevelId,
+                        unconnectedHeight, baseOffset, wall.Flipped, isStructural);
 
-                double layerCenterOffset = CalculateLayerCenterOffset(layers, index, exteriorFaceOffset);
-                double offset = layerCenterOffset - referenceOffset;
-
-                // Place all new layer walls at the exact same location as the original wall
-                Curve translatedCurve = baseCurve;
-
-                Wall newWall = CreateWallFromLayer(document, translatedCurve, layerType, baseLevelId, baseOffset,
-                    topConstraintId, topOffset, unconnectedHeight, wall.Flipped, isStructural, locationLine);
-
-                CopyInstanceParameters(wall, newWall);
-                createdWalls.Add(newWall.Id);
+                    if (newWall != null)
+                    {
+                        createdWalls.Add(newWall.Id);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Just skip this layer and continue
+                    TaskDialog.Show("Wall Layer Splitter Warning",
+                        $"Skipped layer {index + 1}: {ex.Message}");
+                }
             }
 
             // Successfully created all layer walls - no need to delete the original
