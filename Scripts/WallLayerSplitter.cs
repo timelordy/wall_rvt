@@ -8,6 +8,7 @@ using Autodesk.Revit.DB;
 using Autodesk.Revit.Exceptions;
 using Autodesk.Revit.UI;
 using Autodesk.Revit.UI.Selection;
+using InvalidOperationException = System.InvalidOperationException;
 using RevitOperationCanceledException = Autodesk.Revit.Exceptions.OperationCanceledException;
 
 namespace WallRvt.Scripts
