@@ -242,13 +242,39 @@ namespace WallRvt.Scripts
                 }
             }
 
-            if (!layerWallInfos.Any())
+            if (!createdWalls.Any())
             {
+                TaskDialog.Show("Разделение слоев стен",
+                    $"Не удалось создать новые стены для исходной стены {wall.Id.IntegerValue}. Исходная стена оставлена без изменений.");
                 return null;
             }
 
-            RehostFamilyInstances(document, wall, layerWallInfos, baseCurve, wallOrientation,
-                out IList<ElementId> rehostedInstances, out IList<ElementId> unmatchedInstances);
+            try
+            {
+                document.Delete(wall.Id);
+            }
+            catch (Autodesk.Revit.Exceptions.InvalidOperationException ex)
+            {
+                string errorMessage =
+                    $"Не удалось удалить исходную стену (ID: {wall.Id.IntegerValue}). Возможно, на неё ссылаются другие элементы. Подробности: {ex.Message}";
+                throw new InvalidOperationException(errorMessage, ex);
+            }
+            catch (Autodesk.Revit.Exceptions.ArgumentException ex)
+            {
+                string errorMessage =
+                    $"Не удалось удалить исходную стену (ID: {wall.Id.IntegerValue}). Подробности: {ex.Message}";
+                throw new InvalidOperationException(errorMessage, ex);
+            }
+            catch (Exception ex)
+            {
+                string errorMessage =
+                    $"Не удалось удалить исходную стену (ID: {wall.Id.IntegerValue}). Подробности: {ex.Message}";
+                throw new InvalidOperationException(errorMessage, ex);
+            }
+
+            TaskDialog.Show("Разделение слоев стен",
+                $"Стена {wall.Id.IntegerValue} успешно разделена на {createdWalls.Count} новых стен по слоям.\n\n" +
+                "Исходная стена удалена автоматически.");
 
             return new WallSplitResult(wall.Id, createdWalls, rehostedInstances, unmatchedInstances);
         }
