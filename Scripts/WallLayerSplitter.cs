@@ -938,8 +938,7 @@ namespace WallRvt.Scripts
             if (document.IsWorkshared)
             {
                 CheckoutStatus checkoutStatus = WorksharingUtils.GetCheckoutStatus(document, wall.Id);
-                if (checkoutStatus == CheckoutStatus.OwnedByOtherUser ||
-                    checkoutStatus == CheckoutStatus.OwnedByOtherUserInCurrentSession)
+                if (IsOwnedByAnotherUser(checkoutStatus))
                 {
                     detectedReasons.Add("стена занята другим пользователем или находится в недоступном рабочем наборе");
                 }
@@ -979,6 +978,17 @@ namespace WallRvt.Scripts
 
             reason = string.Join("; ", detectedReasons) + ".";
             return false;
+        }
+
+        private static bool IsOwnedByAnotherUser(CheckoutStatus checkoutStatus)
+        {
+            if (checkoutStatus == CheckoutStatus.OwnedByOtherUser)
+            {
+                return true;
+            }
+
+            string statusName = checkoutStatus.ToString();
+            return string.Equals(statusName, "OwnedByOtherUserInCurrentSession", StringComparison.OrdinalIgnoreCase);
         }
 
         private void ReportSkipReason(ElementId wallId, string reason)
