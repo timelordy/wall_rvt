@@ -938,7 +938,8 @@ namespace WallRvt.Scripts
             if (document.IsWorkshared)
             {
                 CheckoutStatus checkoutStatus = WorksharingUtils.GetCheckoutStatus(document, wall.Id);
-                if (checkoutStatus != CheckoutStatus.OwnedByMe && checkoutStatus != CheckoutStatus.NotOwned)
+                if (checkoutStatus == CheckoutStatus.OwnedByOtherUser ||
+                    checkoutStatus == CheckoutStatus.OwnedByOtherUserInCurrentSession)
                 {
                     detectedReasons.Add("стена занята другим пользователем или находится в недоступном рабочем наборе");
                 }
