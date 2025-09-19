@@ -226,7 +226,7 @@ namespace WallRvt.Scripts
                         topConstraintId, topOffset, unconnectedHeight, wall.Flipped, isStructural, locationLine);
 
                     if (newWall.WallType.Id != layerType.Id)
-                    
+                    {
                         CopyInstanceParameters(wall, newWall);
                         createdWalls.Add(newWall.Id);
                         layerWallInfos.Add(new LayerWallInfo(newWall, layer, index, layerOffsetFromReference));
