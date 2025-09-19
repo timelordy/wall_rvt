@@ -575,7 +575,11 @@ namespace WallRvt.Scripts
             BuiltInParameter.WALL_USER_HEIGHT_PARAM,
             BuiltInParameter.WALL_STRUCTURAL_SIGNIFICANT,
             BuiltInParameter.WALL_ATTR_ROOM_BOUNDING,
+#if REVIT_2024_OR_GREATER
+            BuiltInParameter.WALL_FIRE_RATING_PARAM
+#else
             BuiltInParameter.WALL_ATTR_FIRE_RATING
+#endif
         };
 
         private static void CopyInstanceParameters(Wall source, Wall target)
