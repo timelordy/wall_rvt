@@ -204,6 +204,8 @@ namespace WallRvt.Scripts
             double referenceOffset = CalculateReferenceOffset(structure, layers, wallLocationLine, exteriorFaceOffset);
             IList<LayerWallInfo> layerWallInfos = new List<LayerWallInfo>();
 
+            const double offsetTolerance = 1e-9;
+
             for (int index = 0; index < layers.Count; index++)
             {
                 CompoundStructureLayer layer = layers[index];
@@ -214,6 +216,7 @@ namespace WallRvt.Scripts
 
                 try
                 {
+
                     WallType layerType = GetOrCreateLayerType(document, wall.WallType, layer, index);
                     double layerCenterOffset = CalculateLayerCenterOffset(layers, index, exteriorFaceOffset);
                     double layerOffsetFromReference = referenceOffset + layerCenterOffset;
@@ -222,12 +225,15 @@ namespace WallRvt.Scripts
                     Wall newWall = CreateWallFromLayer(document, offsetCurve, layerType, baseLevelId, baseOffset,
                         topConstraintId, topOffset, unconnectedHeight, wall.Flipped, isStructural, locationLine);
 
-                    if (newWall != null)
-                    {
+                    if (newWall.WallType.Id != layerType.Id)
+                    
                         CopyInstanceParameters(wall, newWall);
                         createdWalls.Add(newWall.Id);
                         layerWallInfos.Add(new LayerWallInfo(newWall, layer, index, layerOffsetFromReference));
                     }
+
+                    CopyInstanceParameters(wall, newWall);
+                    createdWalls.Add(newWall.Id);
                 }
                 catch (Exception ex)
                 {
