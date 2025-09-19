@@ -214,6 +214,8 @@ namespace WallRvt.Scripts
                 return null;
             }
 
+            const double offsetTolerance = 1e-9;
+
             for (int index = 0; index < layers.Count; index++)
             {
                 CompoundStructureLayer layer = layers[index];
@@ -224,9 +226,20 @@ namespace WallRvt.Scripts
 
                 try
                 {
+                    double layerCenterOffset = CalculateLayerCenterOffset(layers, index, exteriorFaceOffset);
+                    double totalOffset = referenceOffset + layerCenterOffset;
+                    XYZ translation = wallOrientation.Multiply(totalOffset);
+                    Curve offsetCurve = baseCurve.CreateTransformed(Transform.CreateTranslation(translation));
+
+                    bool layerFlipped = wall.Flipped;
+                    if (Math.Abs(totalOffset) > offsetTolerance && totalOffset < 0)
+                    {
+                        layerFlipped = !layerFlipped;
+                    }
+
                     // Use the basic wall type for all layers - simple and safe
-                    Wall newWall = Wall.Create(document, baseCurve, basicWallType.Id, baseLevelId,
-                        unconnectedHeight, baseOffset, wall.Flipped, isStructural);
+                    Wall newWall = Wall.Create(document, offsetCurve, basicWallType.Id, baseLevelId,
+                        unconnectedHeight, baseOffset, layerFlipped, isStructural);
 
                     if (newWall != null)
                     {
