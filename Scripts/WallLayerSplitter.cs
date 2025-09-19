@@ -1164,6 +1164,11 @@ namespace WallRvt.Scripts
                             continue;
                         }
 
+                        if (dependentId == wall.Id)
+                        {
+                            continue;
+                        }
+
                         int dependentInteger = dependentId.IntegerValue;
 
                         if (detachedFamilyIds != null && detachedFamilyIds.Contains(dependentInteger))
