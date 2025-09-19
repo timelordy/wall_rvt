@@ -947,7 +947,8 @@ namespace WallRvt.Scripts
                 WorksetId worksetId = wall.WorksetId;
                 if (worksetId != WorksetId.InvalidWorksetId)
                 {
-                    Workset workset = WorksetTable.GetWorkset(document, worksetId);
+                    WorksetTable worksetTable = document.GetWorksetTable();
+                    Workset workset = worksetTable.GetWorkset(worksetId);
                     if (workset != null && !workset.IsEditable)
                     {
                         detectedReasons.Add($"рабочий набор \"{workset.Name}\" не передан вам для редактирования");
