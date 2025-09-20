@@ -31,95 +31,145 @@ namespace WallRvt.Scripts
         /// <inheritdoc />
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
-            UIDocument uiDocument = commandData.Application.ActiveUIDocument;
-            if (uiDocument == null)
+            using (CommandLogger logger = CommandLogger.CreateForCommand(nameof(WallLayerSplitter)))
             {
-                message = "Не удалось получить активный документ.";
-                return Result.Failed;
-            }
+                logger?.Log("Запуск команды WallLayerSplitter.Execute.");
 
-            Document document = uiDocument.Document;
-            _skipMessages.Clear();
-            _diagnosticLog.Clear();
-
-            try
-            {
-                IList<Wall> targetWalls = CollectTargetWalls(uiDocument).ToList();
-                if (!targetWalls.Any())
+                UIDocument uiDocument = commandData.Application.ActiveUIDocument;
+                if (uiDocument == null)
                 {
-                    const string noWallsMessage = "Выберите хотя бы одну стену с несколькими слоями.";
-                    TaskDialog.Show("Разделение слоев стен", noWallsMessage);
-                    message = noWallsMessage;
+                    logger?.Log("ActiveUIDocument отсутствует. Команда завершается с ошибкой.");
+                    message = "Не удалось получить активный документ.";
+                    return Result.Failed;
+                }
+
+                Document document = uiDocument.Document;
+                logger?.LogFormat("Активный документ: {0}. Путь: {1}.",
+                    document?.Title ?? "<без названия>",
+                    document?.PathName ?? "<несохранённый>");
+
+                _skipMessages.Clear();
+                logger?.Log("Буфер пропущенных сообщений очищен.");
+                _diagnosticLog.Clear();
+                logger?.Log("Диагностический журнал очищен.");
+
+                try
+                {
+                    IList<Wall> targetWalls = CollectTargetWalls(uiDocument).ToList();
+                    string collectedIds = string.Join(", ",
+                        targetWalls.Select(w => w.Id.IntegerValue.ToString(CultureInfo.InvariantCulture)));
+                    if (targetWalls.Any())
+                    {
+                        logger?.Log($"Получено {targetWalls.Count} стен(ы) для обработки: {collectedIds}.");
+                    }
+                    else
+                    {
+                        logger?.Log("Получено 0 стен для обработки.");
+                    }
+
+                    if (!targetWalls.Any())
+                    {
+                        const string noWallsMessage = "Выберите хотя бы одну стену с несколькими слоями.";
+                        logger?.Log("Команда завершена: отсутствуют подходящие стены для разделения.");
+                        TaskDialog.Show("Разделение слоев стен", noWallsMessage);
+                        message = noWallsMessage;
+                        return Result.Cancelled;
+                    }
+
+                    IList<WallSplitResult> splitResults = new List<WallSplitResult>();
+                    logger?.Log("Создан контейнер для результатов разделения стен.");
+
+                    using (TransactionGroup transactionGroup = new TransactionGroup(document, "Разделение слоёв стен"))
+                    {
+                        logger?.Log("Инициализация TransactionGroup 'Разделение слоёв стен'.");
+                        transactionGroup.Start();
+                        logger?.Log("TransactionGroup.Start выполнен.");
+
+                        try
+                        {
+                            using (Transaction transaction = new Transaction(document, "Создание стен по слоям"))
+                            {
+                                logger?.Log("Инициализация Transaction 'Создание стен по слоям'.");
+                                transaction.Start();
+                                logger?.Log("Transaction.Start выполнен.");
+
+                                foreach (Wall wall in targetWalls)
+                                {
+                                    string wallTypeName = wall.WallType?.Name ?? "<без типа>";
+                                    int wallId = wall.Id.IntegerValue;
+                                    logger?.Log($"Начало обработки стены {wallId} (тип '{wallTypeName}').");
+
+                                    if (!IsWallTypeAccepted(wall.WallType))
+                                    {
+                                        logger?.Log($"Стена {wallId} пропущена: тип не принят фильтром.");
+                                        continue;
+                                    }
+
+                                    WallSplitResult result = SplitWall(document, wall, logger);
+                                    if (result != null)
+                                    {
+                                        logger?.Log($"Стена {wallId} успешно обработана. Добавлен результат.");
+                                        splitResults.Add(result);
+                                    }
+                                    else
+                                    {
+                                        logger?.Log($"Стена {wallId} не была разделена (результат отсутствует).");
+                                    }
+                                }
+
+                                if (!splitResults.Any())
+                                {
+                                    const string nothingProcessed = "Ни одна из выбранных стен не подошла для разделения.";
+                                    string skipDetails = BuildSkipDetails(_skipMessages);
+                                    string dialogText = string.IsNullOrWhiteSpace(skipDetails)
+                                        ? nothingProcessed
+                                        : $"{nothingProcessed}\n\n{skipDetails}";
+
+                                    logger?.Log("Ни одна стена не была обработана. Откат транзакций.");
+                                    TaskDialog.Show("Разделение слоев стен", dialogText);
+                                    transaction.RollBack();
+                                    transactionGroup.RollBack();
+                                    message = dialogText;
+                                    return Result.Cancelled;
+                                }
+
+                                logger?.Log("Коммит Transaction 'Создание стен по слоям'.");
+                                transaction.Commit();
+                                logger?.Log("Transaction.Commit завершён успешно.");
+                            }
+
+                            logger?.Log("Ассимиляция TransactionGroup 'Разделение слоёв стен'.");
+                            transactionGroup.Assimilate();
+                            logger?.Log("TransactionGroup.Assimilate завершена успешно.");
+                        }
+                        catch (Exception ex)
+                        {
+                            logger?.LogException("Ошибка во время выполнения транзакций. Выполняется откат.", ex);
+                            transactionGroup.RollBack();
+                            message = ex.Message;
+                            TaskDialog.Show("Разделение слоев стен", $"Ошибка: {ex.Message}");
+                            return Result.Failed;
+                        }
+                    }
+
+                    logger?.Log("Формирование сводки результатов разделения.");
+                    ShowSummary(splitResults, _skipMessages);
+                    logger?.Log("Команда WallLayerSplitter.Execute завершена успешно.");
+                    return Result.Succeeded;
+                }
+                catch (Exception ex) when (ex is RevitOperationCanceledException || ex is System.OperationCanceledException)
+                {
+                    logger?.Log("Пользователь отменил выбор объектов. Команда отменена.");
+                    message = "Выбор объектов отменён пользователем.";
                     return Result.Cancelled;
                 }
-
-                IList<WallSplitResult> splitResults = new List<WallSplitResult>();
-
-                using (TransactionGroup transactionGroup = new TransactionGroup(document, "Разделение слоёв стен"))
+                catch (Exception ex)
                 {
-                    transactionGroup.Start();
-
-                    try
-                    {
-                        using (Transaction transaction = new Transaction(document, "Создание стен по слоям"))
-                        {
-                            transaction.Start();
-
-                            foreach (Wall wall in targetWalls)
-                            {
-                                if (!IsWallTypeAccepted(wall.WallType))
-                                {
-                                    continue;
-                                }
-
-                                WallSplitResult result = SplitWall(document, wall);
-                                if (result != null)
-                                {
-                                    splitResults.Add(result);
-                                }
-                            }
-
-                            if (!splitResults.Any())
-                            {
-                                const string nothingProcessed = "Ни одна из выбранных стен не подошла для разделения.";
-                                string skipDetails = BuildSkipDetails(_skipMessages);
-                                string dialogText = string.IsNullOrWhiteSpace(skipDetails)
-                                    ? nothingProcessed
-                                    : $"{nothingProcessed}\n\n{skipDetails}";
-                                TaskDialog.Show("Разделение слоев стен", dialogText);
-                                transaction.RollBack();
-                                transactionGroup.RollBack();
-                                message = dialogText;
-                                return Result.Cancelled;
-                            }
-
-                            transaction.Commit();
-                        }
-
-                        transactionGroup.Assimilate();
-                    }
-                    catch (Exception ex)
-                    {
-                        transactionGroup.RollBack();
-                        message = ex.Message;
-                        TaskDialog.Show("Разделение слоев стен", $"Ошибка: {ex.Message}");
-                        return Result.Failed;
-                    }
+                    logger?.LogException("Непредвиденная ошибка в WallLayerSplitter.Execute.", ex);
+                    message = ex.Message;
+                    TaskDialog.Show("Разделение слоев стен", $"Ошибка: {ex.Message}");
+                    return Result.Failed;
                 }
-
-                ShowSummary(splitResults, _skipMessages);
-                return Result.Succeeded;
-            }
-            catch (Exception ex) when (ex is RevitOperationCanceledException || ex is System.OperationCanceledException)
-            {
-                message = "Выбор объектов отменён пользователем.";
-                return Result.Cancelled;
-            }
-            catch (Exception ex)
-            {
-                message = ex.Message;
-                TaskDialog.Show("Разделение слоев стен", $"Ошибка: {ex.Message}");
-                return Result.Failed;
             }
         }
 
@@ -179,32 +229,61 @@ namespace WallRvt.Scripts
         /// </remarks>
         protected virtual bool IsWallTypeAccepted(WallType wallType) => wallType != null;
 
-        private WallSplitResult SplitWall(Document document, Wall wall)
+
+        private WallSplitResult SplitWall(Document document, Wall wall, CommandLogger logger)
         {
+            if (wall == null)
+            {
+                logger?.Log("SplitWall: передана пустая стена. Обработка пропущена.");
+                return null;
+            }
+
+            int wallId = wall.Id.IntegerValue;
+            logger?.Log($"SplitWall: начало обработки стены {wallId}.");
+
+            if (document == null)
+            {
+                logger?.Log($"SplitWall: документ отсутствует для стены {wallId}. Обработка остановлена.");
+                return null;
+            }
+
             CompoundStructure structure = wall.WallType.GetCompoundStructure();
+            int layerCount = structure?.LayerCount ?? 0;
+            logger?.Log($"SplitWall: у стены {wallId} обнаружено {layerCount} слоёв.");
             if (structure == null || structure.LayerCount <= 1)
             {
+                logger?.Log($"SplitWall: стена {wallId} пропущена — {(structure == null ? "отсутствует состав конструкции" : "количество слоёв меньше двух")}.");
                 return null;
             }
 
             LocationCurve locationCurve = wall.Location as LocationCurve;
+            bool hasLocation = locationCurve != null;
+            logger?.Log($"SplitWall: у стены {wallId} {(hasLocation ? "найдена" : "не найдена")} геометрия LocationCurve.");
             if (locationCurve == null)
             {
+                logger?.Log($"SplitWall: стена {wallId} пропущена из-за отсутствия LocationCurve.");
                 return null;
             }
 
             ICollection<ElementId> hostedFamilyIds =
                 wall.GetDependentElements(new ElementClassFilter(typeof(FamilyInstance)));
+            logger?.Log($"SplitWall: у стены {wallId} найдено {(hostedFamilyIds?.Count ?? 0)} зависимых семейств.");
 
             IList<ElementId> failedToDetachInstanceIds;
             IList<FamilyInstance> detachedFamilyInstances = DetachHostedFamilyInstances(document, wall,
                 hostedFamilyIds, out failedToDetachInstanceIds);
+            logger?.Log($"SplitWall: временно отвязано {detachedFamilyInstances.Count} семейств, не удалось отвязать {(failedToDetachInstanceIds?.Count ?? 0)}.");
 
             HashSet<int> detachedFamilyIdSet = new HashSet<int>(detachedFamilyInstances
                 .Where(instance => instance != null)
                 .Select(instance => instance.Id.IntegerValue));
 
-            if (!CanDeleteOriginalWall(document, wall, detachedFamilyIdSet, out string deleteRestrictionReason))
+            string deleteRestrictionReason;
+            bool canDelete = CanDeleteOriginalWall(document, wall, detachedFamilyIdSet, out deleteRestrictionReason, logger);
+            logger?.Log(canDelete
+                ? $"SplitWall: удаление исходной стены {wallId} разрешено."
+                : $"SplitWall: удаление исходной стены {wallId} запрещено: {deleteRestrictionReason}");
+            if (!canDelete)
             {
                 if (failedToDetachInstanceIds != null && failedToDetachInstanceIds.Any())
                 {
@@ -213,9 +292,11 @@ namespace WallRvt.Scripts
                     deleteRestrictionReason = string.IsNullOrWhiteSpace(deleteRestrictionReason)
                         ? $"не удалось временно отвязать семейства: {failedToDetachList}"
                         : $"{deleteRestrictionReason}; не удалось временно отвязать семейства: {failedToDetachList}";
+                    logger?.Log($"SplitWall: дополнительно зафиксировано, что не удалось отвязать семейства: {failedToDetachList}.");
                 }
 
                 RestoreFamilyInstancesToHost(detachedFamilyInstances, wall);
+                logger?.Log($"SplitWall: стене {wallId} восстановлены исходные связи семейств. Причина пропуска: {deleteRestrictionReason}.");
                 ReportSkipReason(wall.Id, $"невозможно удалить исходную стену: {deleteRestrictionReason}");
                 return null;
             }
@@ -225,6 +306,7 @@ namespace WallRvt.Scripts
             XYZ wallOrientation = wall.Orientation;
             double orientationLength = wallOrientation.GetLength();
             wallOrientation = orientationLength > 1e-9 ? wallOrientation.Normalize() : XYZ.BasisY;
+            logger?.Log($"SplitWall: ориентация стены {wallId} нормализована. Длина исходного вектора: {orientationLength}.");
 
             ElementId baseLevelId = wall.get_Parameter(BuiltInParameter.WALL_BASE_CONSTRAINT).AsElementId();
             double baseOffset = wall.get_Parameter(BuiltInParameter.WALL_BASE_OFFSET).AsDouble();
@@ -233,6 +315,7 @@ namespace WallRvt.Scripts
             double unconnectedHeight = wall.get_Parameter(BuiltInParameter.WALL_USER_HEIGHT_PARAM).AsDouble();
             bool isStructural = wall.get_Parameter(BuiltInParameter.WALL_STRUCTURAL_SIGNIFICANT).AsInteger() == 1;
             int locationLine = wall.get_Parameter(BuiltInParameter.WALL_KEY_REF_PARAM).AsInteger();
+            logger?.Log($"SplitWall: параметры стены {wallId}: baseLevelId={baseLevelId.IntegerValue}, topConstraintId={topConstraintId.IntegerValue}, isStructural={isStructural}, locationLine={locationLine}.");
 
             IList<CompoundStructureLayer> layers = structure.GetLayers();
             WallLocationReference wallLocationLine = ResolveWallLocationLine(locationLine);
@@ -240,18 +323,20 @@ namespace WallRvt.Scripts
             double exteriorFaceOffset = totalThickness / 2.0;
             double referenceOffset = CalculateReferenceOffset(structure, layers, wallLocationLine, exteriorFaceOffset);
             IList<LayerWallInfo> layerWallInfos = new List<LayerWallInfo>();
+            logger?.Log($"SplitWall: стена {wallId} — всего слоёв {layers.Count}, суммарная толщина {totalThickness}.");
 
             for (int index = 0; index < layers.Count; index++)
             {
                 CompoundStructureLayer layer = layers[index];
+                logger?.Log($"SplitWall: обработка слоя {index + 1} толщиной {layer.Width} и материалом {layer.MaterialId.IntegerValue}.");
                 if (layer.Width <= 0)
                 {
+                    logger?.Log($"SplitWall: слой {index + 1} пропущен из-за нулевой толщины.");
                     continue;
                 }
 
                 try
                 {
-
                     WallType layerType = GetOrCreateLayerType(document, wall.WallType, layer, index);
                     double layerCenterOffset = CalculateLayerCenterOffset(layers, index, exteriorFaceOffset);
                     double layerOffsetFromReference = referenceOffset + layerCenterOffset;
@@ -263,9 +348,12 @@ namespace WallRvt.Scripts
                     CopyInstanceParameters(wall, newWall);
                     createdWalls.Add(newWall.Id);
                     layerWallInfos.Add(new LayerWallInfo(newWall, layer, index, layerOffsetFromReference));
+                    logger?.Log($"SplitWall: создана стена {newWall.Id.IntegerValue} для слоя {index + 1} со смещением {layerOffsetFromReference}.");
                 }
                 catch (Exception ex)
                 {
+                    string creationMessage = $"SplitWall: ошибка при создании стены для слоя {index + 1} исходной стены {wallId}.";
+                    logger?.LogException(creationMessage, ex);
                     TaskDialog.Show("Разделение слоев стен",
                         $"Не удалось создать стену для слоя {index + 1}: {ex.Message}");
                 }
@@ -273,18 +361,23 @@ namespace WallRvt.Scripts
 
             if (!createdWalls.Any())
             {
+                logger?.Log($"SplitWall: ни одной стены не создано для исходной стены {wallId}. Выполняется откат действий.");
                 TaskDialog.Show("Разделение слоев стен",
                     $"Не удалось создать новые стены для исходной стены {wall.Id.IntegerValue}. Исходная стена оставлена без изменений.");
                 RestoreFamilyInstancesToHost(detachedFamilyInstances, wall);
+                logger?.Log($"SplitWall: восстановлены исходные связи семейств для стены {wallId} после неудачи создания новых стен.");
                 return null;
             }
 
             try
             {
+                logger?.Log($"SplitWall: попытка удалить исходную стену {wallId}.");
                 document.Delete(wall.Id);
+                logger?.Log($"SplitWall: исходная стена {wallId} успешно удалена.");
             }
             catch (Autodesk.Revit.Exceptions.InvalidOperationException ex)
             {
+                logger?.LogException($"SplitWall: Revit сообщил об ошибке InvalidOperationException при удалении стены {wallId}. Последняя проверка CanDeleteOriginalWall: {deleteRestrictionReason}", ex);
                 RestoreFamilyInstancesToHost(detachedFamilyInstances, wall);
                 string errorMessage =
                     $"Не удалось удалить исходную стену (ID: {wall.Id.IntegerValue}). Возможно, на неё ссылаются другие элементы. Подробности: {ex.Message}";
@@ -292,6 +385,7 @@ namespace WallRvt.Scripts
             }
             catch (Autodesk.Revit.Exceptions.ArgumentException ex)
             {
+                logger?.LogException($"SplitWall: Revit сообщил об ошибке ArgumentException при удалении стены {wallId}. Последняя проверка CanDeleteOriginalWall: {deleteRestrictionReason}", ex);
                 RestoreFamilyInstancesToHost(detachedFamilyInstances, wall);
                 string errorMessage =
                     $"Не удалось удалить исходную стену (ID: {wall.Id.IntegerValue}). Подробности: {ex.Message}";
@@ -299,6 +393,7 @@ namespace WallRvt.Scripts
             }
             catch (Exception ex)
             {
+                logger?.LogException($"SplitWall: общее исключение при удалении стены {wallId}. Последняя проверка CanDeleteOriginalWall: {deleteRestrictionReason}", ex);
                 RestoreFamilyInstancesToHost(detachedFamilyInstances, wall);
                 string errorMessage =
                     $"Не удалось удалить исходную стену (ID: {wall.Id.IntegerValue}). Подробности: {ex.Message}";
@@ -310,6 +405,7 @@ namespace WallRvt.Scripts
 
             RehostFamilyInstances(document, layerWallInfos, baseCurve, wallOrientation, detachedFamilyInstances,
                 out rehostedInstances, out unmatchedInstances);
+            logger?.Log($"SplitWall: для стены {wallId} перепривязано {rehostedInstances.Count} семейств, не удалось перепривязать {unmatchedInstances.Count}.");
 
             StringBuilder wallMessageBuilder = new StringBuilder();
             wallMessageBuilder.AppendLine(
@@ -335,12 +431,11 @@ namespace WallRvt.Scripts
             wallMessageBuilder.Append("Исходная стена удалена автоматически.");
 
             TaskDialog.Show("Разделение слоев стен", wallMessageBuilder.ToString());
+            logger?.Log($"SplitWall: завершение обработки стены {wallId}. Создано {createdWalls.Count} стен.");
 
             return new WallSplitResult(wall.Id, createdWalls, rehostedInstances, unmatchedInstances,
                 failedToDetachInstanceIds);
         }
-
-
         private static string BuildLayerTypeKey(ElementId baseTypeId, CompoundStructureLayer layer, int index)
         {
             return string.Join("_", baseTypeId.IntegerValue, index, layer.Function,
@@ -1084,27 +1179,34 @@ namespace WallRvt.Scripts
             return builder.ToString().TrimEnd();
         }
 
+
+
         private bool CanDeleteOriginalWall(Document document, Wall wall, ISet<int> detachedFamilyIds,
-            out string reason)
+            out string reason, CommandLogger logger)
         {
             reason = string.Empty;
 
             if (document == null || wall == null)
             {
+                logger?.Log("CanDeleteOriginalWall: документ или стена не заданы.");
                 reason = "не удалось получить данные стены.";
                 LogDiagnostic("Блокирующая проверка: не удалось получить данные стены.");
                 return false;
             }
 
+            int wallId = wall.Id.IntegerValue;
+            logger?.Log($"CanDeleteOriginalWall: старт проверки для стены {wallId}.");
+
             List<string> detectedReasons = new List<string>();
 
             HashSet<int> detachedJoinedElementIds = new HashSet<int>();
+            HashSet<int> blockedJoinedElementIds = new HashSet<int>();
             List<string> joinDetachFailures = new List<string>();
 
             if (document.IsModifiable)
             {
                 IList<ElementId> detachedJoinedElements = TryDetachJoinedElements(document, wall,
-                    joinDetachFailures, null);
+                    joinDetachFailures, blockedJoinedElementIds);
 
                 if (detachedJoinedElements != null)
                 {
@@ -1117,20 +1219,33 @@ namespace WallRvt.Scripts
 
                         detachedJoinedElementIds.Add(detachedId.IntegerValue);
                     }
+
+                    if (detachedJoinedElements.Count > 0)
+                    {
+                        string detachedList = string.Join(", ", detachedJoinedElements
+                            .Select(id => id.IntegerValue.ToString(CultureInfo.InvariantCulture)));
+                        logger?.Log($"CanDeleteOriginalWall: временно разорвано соединение с элементами: {detachedList}.");
+                    }
                 }
+            }
+            else
+            {
+                logger?.Log("CanDeleteOriginalWall: документ не находится в режиме редактирования, разрыв соединений невозможен.");
             }
 
             if (joinDetachFailures.Any())
             {
                 string failureList = string.Join(", ", joinDetachFailures.Distinct());
-                AddBlockingReason(detectedReasons,
-                    "не удалось разорвать соединение со следующими элементами: " + failureList);
+                string description = "не удалось разорвать соединение со следующими элементами: " + failureList;
+                AddBlockingReason(detectedReasons, description);
+                logger?.Log($"CanDeleteOriginalWall: ограничение — {description}.");
             }
 
             if (!document.IsModifiable)
             {
-                AddBlockingReason(detectedReasons,
-                    "документ открыт только для чтения — изменения в нём сейчас недоступны");
+                string description = "документ открыт только для чтения — изменения в нём сейчас недоступны";
+                AddBlockingReason(detectedReasons, description);
+                logger?.Log($"CanDeleteOriginalWall: ограничение — {description}.");
             }
 
             if (document.IsWorkshared)
@@ -1138,8 +1253,9 @@ namespace WallRvt.Scripts
                 CheckoutStatus checkoutStatus = WorksharingUtils.GetCheckoutStatus(document, wall.Id);
                 if (IsOwnedByAnotherUser(checkoutStatus))
                 {
-                    AddBlockingReason(detectedReasons,
-                        "стена занята другим пользователем или находится в недоступном рабочем наборе");
+                    string description = "стена занята другим пользователем или находится в недоступном рабочем наборе";
+                    AddBlockingReason(detectedReasons, description);
+                    logger?.Log($"CanDeleteOriginalWall: ограничение — {description}.");
                 }
 
                 WorksetId worksetId = wall.WorksetId;
@@ -1149,20 +1265,25 @@ namespace WallRvt.Scripts
                     Workset workset = worksetTable.GetWorkset(worksetId);
                     if (workset != null && !workset.IsEditable)
                     {
-                        AddBlockingReason(detectedReasons,
-                            $"рабочий набор \"{workset.Name}\" не передан вам для редактирования");
+                        string description = $"рабочий набор \"{workset.Name}\" не передан вам для редактирования";
+                        AddBlockingReason(detectedReasons, description);
+                        logger?.Log($"CanDeleteOriginalWall: ограничение — {description}.");
                     }
                 }
             }
 
             if (wall.Pinned)
             {
-                AddBlockingReason(detectedReasons, "стена закреплена командой Pin");
+                const string description = "стена закреплена командой Pin";
+                AddBlockingReason(detectedReasons, description);
+                logger?.Log($"CanDeleteOriginalWall: ограничение — {description}.");
             }
 
             if (wall.GroupId != ElementId.InvalidElementId)
             {
-                AddBlockingReason(detectedReasons, "стена входит в группу");
+                const string description = "стена входит в группу";
+                AddBlockingReason(detectedReasons, description);
+                logger?.Log($"CanDeleteOriginalWall: ограничение — {description}.");
             }
 
             ElementId designOptionId = GetDesignOptionId(wall);
@@ -1178,15 +1299,18 @@ namespace WallRvt.Scripts
             if (designOptionId != ElementId.InvalidElementId && designOptionId != activeDesignOptionId)
             {
                 string optionDescription = BuildDesignOptionDescription(document, designOptionId);
-                AddBlockingReason(detectedReasons,
-                    $"стена принадлежит неактивной дизайн-опции {optionDescription}");
+                string description = $"стена принадлежит неактивной дизайн-опции {optionDescription}";
+                AddBlockingReason(detectedReasons, description);
+                logger?.Log($"CanDeleteOriginalWall: ограничение — {description}.");
             }
 
             ElementId assemblyId = wall.AssemblyInstanceId;
             if (assemblyId != null && assemblyId != ElementId.InvalidElementId)
             {
                 string assemblyDescription = BuildAssemblyDescription(document, assemblyId);
-                AddBlockingReason(detectedReasons, $"стена входит в сборку {assemblyDescription}");
+                string description = $"стена входит в сборку {assemblyDescription}";
+                AddBlockingReason(detectedReasons, description);
+                logger?.Log($"CanDeleteOriginalWall: ограничение — {description}.");
             }
 
             bool hasAssociatedParts = false;
@@ -1205,7 +1329,9 @@ namespace WallRvt.Scripts
 
             if (hasAssociatedParts)
             {
-                AddBlockingReason(detectedReasons, "стена разбита на части (Parts)");
+                const string description = "стена разбита на части (Parts)";
+                AddBlockingReason(detectedReasons, description);
+                logger?.Log($"CanDeleteOriginalWall: ограничение — {description}.");
             }
 
             Parameter phaseCreatedParameter = wall.get_Parameter(BuiltInParameter.WALL_PHASE_CREATED);
@@ -1221,8 +1347,9 @@ namespace WallRvt.Scripts
                     if (activePhaseId != ElementId.InvalidElementId && activePhaseId != phaseCreatedId)
                     {
                         string phaseDescription = BuildPhaseDescription(document, phaseCreatedId);
-                        AddBlockingReason(detectedReasons,
-                            $"стена создана в фазе {phaseDescription}, которая не совпадает с фазой активного вида");
+                        string description = $"стена создана в фазе {phaseDescription}, которая не совпадает с фазой активного вида";
+                        AddBlockingReason(detectedReasons, description);
+                        logger?.Log($"CanDeleteOriginalWall: ограничение — {description}.");
                     }
                 }
             }
@@ -1270,21 +1397,30 @@ namespace WallRvt.Scripts
                     if (blockingDescriptions.Any())
                     {
                         string blockingList = string.Join(", ", blockingDescriptions.Distinct());
-                        AddBlockingReason(detectedReasons,
-                            "у стены остались зависимые элементы, которые блокируют удаление: " + blockingList);
+                        string description = "у стены остались зависимые элементы, которые блокируют удаление: " + blockingList;
+                        AddBlockingReason(detectedReasons, description);
+                        logger?.Log($"CanDeleteOriginalWall: ограничение — {description}.");
                     }
                 }
             }
 
+            if (blockedJoinedElementIds.Any())
+            {
+                string blockedList = string.Join(", ", blockedJoinedElementIds
+                    .Select(id => id.ToString(CultureInfo.InvariantCulture)));
+                logger?.Log($"CanDeleteOriginalWall: элементы, которые не удалось отсоединить, останутся заблокированными: {blockedList}.");
+            }
+
             if (!detectedReasons.Any())
             {
+                logger?.Log($"CanDeleteOriginalWall: препятствий для удаления стены {wallId} не обнаружено.");
                 return true;
             }
 
-            reason = string.Join("; ", detectedReasons);
+            reason = string.Join("; ", detectedReasons) + ".";
+            logger?.Log($"CanDeleteOriginalWall: итоговое решение по стене {wallId} — удалить нельзя: {reason}");
             return false;
         }
-
         private static IList<ElementId> TryDetachJoinedElements(Document document, Wall wall,
             ICollection<string> failureDescriptions, ISet<int> blockedElementIds)
         {
