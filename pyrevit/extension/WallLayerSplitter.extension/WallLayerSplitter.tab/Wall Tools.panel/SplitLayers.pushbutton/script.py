@@ -189,6 +189,37 @@ def try_get_wall_type(document, wall):
         return None
 
 
+def try_is_element_associated_with_parts(document, element_id):
+    """Безопасно проверить привязку элемента к частям (Parts)."""
+
+    if document is None or element_id is None:
+        return False, "не удалось получить документ или идентификатор элемента"
+
+    method = getattr(PartUtils, "IsElementAssociatedWithParts", None)
+    if method is None:
+        LOGGER.debug(
+            "PartUtils.IsElementAssociatedWithParts недоступен в текущей версии API."
+        )
+        return False, "API не поддерживает проверку разбивки на части"
+
+    try:
+        return bool(method(document, element_id)), ""
+    except (InvalidOperationException, ArgumentException):
+        return False, "API отклонило проверку разбивки на части"
+    except AttributeError:
+        LOGGER.debug(
+            "PartUtils.IsElementAssociatedWithParts отсутствует у типа PartUtils."
+        )
+        return False, "API не содержит метод проверки разбивки на части"
+    except Exception as error:  # noqa: BLE001
+        LOGGER.debug(
+            "Не удалось выполнить PartUtils.IsElementAssociatedWithParts для элемента %s: %s",
+            element_id,
+            error,
+        )
+        return False, "ошибка при обращении к API Parts"
+
+
 class WallLocationReference(enum.IntEnum):
     WALL_CENTERLINE = 0
     CORE_CENTERLINE = 1
@@ -1057,11 +1088,13 @@ class WallLayerSplitterCommand(object):
             assembly_description = build_assembly_description(self.doc, assembly_id)
             self.add_blocking_reason(detected_reasons, "стена входит в сборку {}".format(assembly_description))
 
-        has_associated_parts = False
-        try:
-            has_associated_parts = PartUtils.IsElementAssociatedWithParts(self.doc, wall.Id)
-        except (InvalidOperationException, ArgumentException):
-            has_associated_parts = False
+        has_associated_parts, parts_check_message = try_is_element_associated_with_parts(
+            self.doc, wall.Id
+        )
+        if parts_check_message:
+            self.log_diagnostic(
+                "Проверка разбивки на части: {0}.".format(parts_check_message)
+            )
         if has_associated_parts:
             self.add_blocking_reason(detected_reasons, "стена разбита на части (Parts)")
 
