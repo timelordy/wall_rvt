@@ -52,6 +52,9 @@ from logger import get_logger  # noqa: E402
 LOGGER = get_logger("WallLayerSplitter")
 OUTPUT = script.get_output()
 
+MAX_LAYER_TYPE_NAME_LENGTH = 200
+MAX_LAYER_TYPE_NAME_ATTEMPTS = 50
+
 
 class WallLocationReference(enum.IntEnum):
     WALL_CENTERLINE = 0
@@ -106,6 +109,7 @@ class WallLayerSplitterCommand(object):
         self.layer_type_cache = {}
         self.skip_messages = []
         self.diagnostic_log = []
+        self.wall_type_name_map = None
 
     def execute(self):
         ui_doc = revit.uidoc
@@ -355,7 +359,12 @@ class WallLayerSplitterCommand(object):
                 self.layer_type_cache[cache_key] = candidate.Id
                 return candidate
 
-        duplicated = base_type.Duplicate(type_name)
+        existing = self.find_wall_type_by_name(type_name)
+        if isinstance(existing, WallType):
+            self.layer_type_cache[cache_key] = existing.Id
+            return existing
+
+        duplicated = self.duplicate_wall_type_with_safe_name(base_type, type_name, index)
         if not isinstance(duplicated, WallType):
             raise InvalidOperationException("Не удалось продублировать тип стены для слоя.")
 
@@ -367,6 +376,95 @@ class WallLayerSplitterCommand(object):
 
         self.layer_type_cache[cache_key] = duplicated.Id
         return duplicated
+
+    def duplicate_wall_type_with_safe_name(self, base_type, desired_name, layer_index):
+        base_name = self.prepare_layer_type_base_name(desired_name)
+        name_map = self.get_wall_type_name_map()
+
+        for attempt in range(1, MAX_LAYER_TYPE_NAME_ATTEMPTS + 1):
+            candidate_name = self.build_candidate_layer_type_name(base_name, attempt)
+            name_key = self.normalize_wall_type_name(candidate_name)
+            if name_key in name_map:
+                LOGGER.debug(
+                    "Тип стены с именем '%s' уже существует, попытка %s пропущена.",
+                    candidate_name,
+                    attempt,
+                )
+                continue
+
+            try:
+                duplicated = base_type.Duplicate(candidate_name)
+            except (ArgumentException, InvalidOperationException) as error:
+                LOGGER.warning(
+                    "Не удалось создать тип стены '%s' (попытка %s): %s",
+                    candidate_name,
+                    attempt,
+                    error,
+                )
+                continue
+
+            if isinstance(duplicated, WallType):
+                self.register_wall_type(duplicated)
+                return duplicated
+
+            raise InvalidOperationException(
+                "Получен некорректный тип при дублировании слоя {}.".format(layer_index + 1)
+            )
+
+        raise InvalidOperationException(
+            "Не удалось подобрать уникальное имя типа для слоя {}. Сократите имена материалов или исходных типов.".format(
+                layer_index + 1
+            )
+        )
+
+    def prepare_layer_type_base_name(self, desired_name):
+        base_name = (desired_name or "").strip()
+        if not base_name:
+            base_name = "Тип слоя"
+        if len(base_name) > MAX_LAYER_TYPE_NAME_LENGTH:
+            LOGGER.debug(
+                "Имя типа слоя превышает %s символов, выполняется обрезка: %s",
+                MAX_LAYER_TYPE_NAME_LENGTH,
+                base_name,
+            )
+            base_name = base_name[:MAX_LAYER_TYPE_NAME_LENGTH].rstrip()
+        return base_name
+
+    def build_candidate_layer_type_name(self, base_name, attempt):
+        if attempt <= 1:
+            return base_name
+        suffix = " ({})".format(attempt)
+        max_base_length = max(1, MAX_LAYER_TYPE_NAME_LENGTH - len(suffix))
+        trimmed = base_name[:max_base_length].rstrip()
+        if not trimmed:
+            trimmed = base_name[:max_base_length]
+        return "{}{}".format(trimmed, suffix)
+
+    def get_wall_type_name_map(self):
+        if self.wall_type_name_map is None:
+            self.wall_type_name_map = {}
+            for candidate in FilteredElementCollector(self.doc).OfClass(WallType):
+                if isinstance(candidate, WallType) and candidate.Name:
+                    name_key = self.normalize_wall_type_name(candidate.Name)
+                    if name_key:
+                        self.wall_type_name_map[name_key] = candidate
+        return self.wall_type_name_map
+
+    def register_wall_type(self, wall_type):
+        if not isinstance(wall_type, WallType) or not wall_type.Name:
+            return
+        name_key = self.normalize_wall_type_name(wall_type.Name)
+        if name_key:
+            self.get_wall_type_name_map()[name_key] = wall_type
+
+    def find_wall_type_by_name(self, type_name):
+        if not type_name:
+            return None
+        return self.get_wall_type_name_map().get(self.normalize_wall_type_name(type_name))
+
+    @staticmethod
+    def normalize_wall_type_name(name):
+        return (name or "").strip().lower()
 
     @staticmethod
     def calculate_total_thickness(layers):
