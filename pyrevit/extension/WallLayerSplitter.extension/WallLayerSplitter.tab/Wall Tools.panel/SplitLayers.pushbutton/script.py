@@ -11,7 +11,6 @@ from Autodesk.Revit.DB import (
     XYZ,
     AssemblyInstance,
     BuiltInParameter,
-    CheckoutStatus,
     CompoundStructureLayer,
     DesignOption,
     ElementClassFilter,
@@ -35,7 +34,6 @@ from Autodesk.Revit.DB import (
     WallType,
     WallUtils,
     WorksetId,
-    WorksharingUtils,
 )
 from Autodesk.Revit.Exceptions import ArgumentException, InvalidOperationException, OperationCanceledException
 from Autodesk.Revit.UI import TaskDialog
@@ -854,10 +852,20 @@ class WallLayerSplitterCommand(object):
             self.add_blocking_reason(detected_reasons, description)
 
         if self.doc.IsWorkshared:
-            checkout_status = WorksharingUtils.GetCheckoutStatus(self.doc, wall.Id)
-            if is_owned_by_another_user(checkout_status):
-                description = "стена занята другим пользователем или в недоступном рабочем наборе"
+            owner_name = get_element_owner_name(wall)
+            current_user = get_document_username(self.doc)
+            if is_owned_by_another_user(owner_name, current_user):
+                if owner_name:
+                    description = "стена занята пользователем \"{0}\"".format(owner_name)
+                else:
+                    description = "стена занята другим пользователем"
                 self.add_blocking_reason(detected_reasons, description)
+                self.log_diagnostic(
+                    "Стена {0}: {1}.".format(
+                        format_element_id(wall.Id),
+                        description,
+                    )
+                )
 
             workset_id = wall.WorksetId
             if workset_id != WorksetId.InvalidWorksetId:
@@ -1286,10 +1294,56 @@ def try_disallow_wall_joins_at_both_ends(wall):
             continue
 
 
-def is_owned_by_another_user(checkout_status):
-    if checkout_status == CheckoutStatus.OwnedByOtherUser:
+def get_document_username(document):
+    if document is None:
+        return ""
+    try:
+        application = document.Application
+    except Exception:  # noqa: BLE001
+        application = None
+    if application is None:
+        return ""
+    try:
+        username = application.Username
+    except Exception:  # noqa: BLE001
+        username = getattr(application, "Username", None)
+    if not username:
+        return ""
+    return str(username).strip()
+
+
+def get_element_owner_name(element):
+    if element is None:
+        return ""
+    try:
+        owner_param = element.get_Parameter(BuiltInParameter.EDITED_BY)
+    except Exception:  # noqa: BLE001
+        owner_param = None
+    if owner_param is None:
+        return ""
+    try:
+        owner_value = owner_param.AsString()
+    except Exception:  # noqa: BLE001
+        owner_value = None
+    if not owner_value:
+        return ""
+    return str(owner_value).strip()
+
+
+def normalize_username(username):
+    if not username:
+        return ""
+    return str(username).strip().lower()
+
+
+def is_owned_by_another_user(owner_name, current_username):
+    owner = normalize_username(owner_name)
+    if not owner:
+        return False
+    current = normalize_username(current_username)
+    if not current:
         return True
-    return str(checkout_status).lower() == "ownedbyotheruserincurrentsession"
+    return owner != current
 
 
 def build_element_description(element):
