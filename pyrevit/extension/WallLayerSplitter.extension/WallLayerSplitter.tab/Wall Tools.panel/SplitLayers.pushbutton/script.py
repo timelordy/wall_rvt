@@ -8,45 +8,94 @@ import os
 import re
 import sys
 
-from Autodesk.Revit.DB import (
-    XYZ,
-    AssemblyInstance,
-    BuiltInParameter,
-    CompoundStructureLayer,
-    DesignOption,
-    ElementClassFilter,
-    ElementId,
-    FamilyInstance,
-    FilteredElementCollector,
-    HostObject,
-    IntersectionResult,
-    JoinGeometryUtils,
-    LocationCurve,
-    LocationPoint,
-    Material,
-    MaterialFunctionAssignment,
-    PartUtils,
-    Phase,
-    StorageType,
-    Transaction,
-    TransactionGroup,
-    Transform,
-    Wall,
-    WallType,
-    WallUtils,
-    WorksetId,
-)
-from Autodesk.Revit.Exceptions import ArgumentException, InvalidOperationException, OperationCanceledException
-from Autodesk.Revit.UI import TaskDialog
-from Autodesk.Revit.UI.Selection import ISelectionFilter, ObjectType
-
-from pyrevit import revit, script
-
 LIB_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "lib"))
 if LIB_DIR not in sys.path:
     sys.path.append(LIB_DIR)
 
+REVIT_API_AVAILABLE = True
+try:  # pragma: no cover - импорт работает только внутри Revit
+    from Autodesk.Revit.DB import (
+        XYZ,
+        AssemblyInstance,
+        BuiltInParameter,
+        CompoundStructureLayer,
+        DesignOption,
+        ElementClassFilter,
+        ElementId,
+        FamilyInstance,
+        FilteredElementCollector,
+        HostObject,
+        IntersectionResult,
+        JoinGeometryUtils,
+        LocationCurve,
+        LocationPoint,
+        Material,
+        MaterialFunctionAssignment,
+        PartUtils,
+        Phase,
+        StorageType,
+        Transaction,
+        TransactionGroup,
+        Transform,
+        Wall,
+        WallType,
+        WallUtils,
+        WorksetId,
+    )
+    from Autodesk.Revit.Exceptions import (  # noqa: F401
+        ArgumentException,
+        InvalidOperationException,
+        OperationCanceledException,
+    )
+    from Autodesk.Revit.UI import TaskDialog
+    from Autodesk.Revit.UI.Selection import ISelectionFilter, ObjectType
+except Exception:  # pragma: no cover - использование заглушек вне Revit
+    from revit_stub import (  # type: ignore
+        ArgumentException,
+        AssemblyInstance,
+        BuiltInParameter,
+        CompoundStructureLayer,
+        DesignOption,
+        ElementClassFilter,
+        ElementId,
+        FamilyInstance,
+        FilteredElementCollector,
+        HostObject,
+        ISelectionFilter,
+        IntersectionResult,
+        JoinGeometryUtils,
+        LocationCurve,
+        LocationPoint,
+        Material,
+        MaterialFunctionAssignment,
+        ObjectType,
+        OperationCanceledException,
+        PartUtils,
+        Phase,
+        StorageType,
+        TaskDialog,
+        Transaction,
+        TransactionGroup,
+        Transform,
+        Wall,
+        WallType,
+        WallUtils,
+        WorksetId,
+        XYZ,
+        InvalidOperationException,
+    )
+    REVIT_API_AVAILABLE = False
+
+try:  # pragma: no cover - модуль доступен только в среде pyRevit
+    from pyrevit import revit, script  # type: ignore
+except Exception:  # pragma: no cover - fallback на заглушки
+    from revit_stub import revit, script  # type: ignore
+
 from logger import get_logger  # noqa: E402
+
+NOT_IN_REVIT_MESSAGE = (
+    "Команда доступна только в Autodesk Revit. Запустите её через pyRevit."
+)
 
 LOGGER = get_logger("WallLayerSplitter")
 OUTPUT = script.get_output()
@@ -196,7 +245,17 @@ class WallLayerSplitterCommand(object):
         self.wall_type_name_map = None
 
     def execute(self):
-        ui_doc = revit.uidoc
+        if not REVIT_API_AVAILABLE:
+            LOGGER.error("Команда WallLayerSplitter запущена вне Autodesk Revit.")
+            TaskDialog.Show("Разделение слоев стен", NOT_IN_REVIT_MESSAGE)
+            if OUTPUT is not None:
+                try:
+                    OUTPUT.print_md("**Ошибка:** {0}".format(NOT_IN_REVIT_MESSAGE))
+                except Exception:  # pragma: no cover - резервный вывод
+                    pass
+            return
+
+        ui_doc = getattr(revit, "uidoc", None)
         if ui_doc is None:
             TaskDialog.Show("Разделение слоев стен", "Не удалось получить активный документ.")
             return
