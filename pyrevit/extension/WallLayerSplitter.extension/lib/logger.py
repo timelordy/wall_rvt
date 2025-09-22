@@ -5,8 +5,6 @@
 функций, которые можно вызывать из команд расширения.
 """
 
-from __future__ import annotations
-
 from pyrevit import script
 
 
