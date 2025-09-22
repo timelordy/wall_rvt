@@ -277,7 +277,7 @@ class WallLayerSplitterCommand(object):
 
         split_results = []
 
-        tgroup = TransactionGroup(self.doc, "Разделение слоёв стен")
+        tgroup = TransactionGroup(self.doc, "Разделение слоев стен")
         try:
             tgroup.Start()
             LOGGER.debug("TransactionGroup начата.")
@@ -1078,7 +1078,7 @@ class WallLayerSplitterCommand(object):
         return detached_elements
 
     def show_summary(self, results, skipped_messages):
-        builder = ["Результат разделения слоёв стен:"]
+        builder = ["Результат разделения слоев стен:"]
         total_created = 0
         total_rehosted = 0
         total_unmatched = 0
