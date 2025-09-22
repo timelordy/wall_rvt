@@ -200,17 +200,21 @@ def try_is_element_associated_with_parts(document, element_id):
         LOGGER.debug(
             "PartUtils.IsElementAssociatedWithParts недоступен в текущей версии API."
         )
-        return False, "API не поддерживает проверку разбивки на части"
+        return False, ""
 
     try:
         return bool(method(document, element_id)), ""
     except (InvalidOperationException, ArgumentException):
-        return False, "API отклонило проверку разбивки на части"
+        LOGGER.debug(
+            "API отклонило проверку привязки к частям для элемента %s.",
+            element_id,
+        )
+        return False, ""
     except AttributeError:
         LOGGER.debug(
             "PartUtils.IsElementAssociatedWithParts отсутствует у типа PartUtils."
         )
-        return False, "API не содержит метод проверки разбивки на части"
+        return False, ""
     except Exception as error:  # noqa: BLE001
         LOGGER.debug(
             "Не удалось выполнить PartUtils.IsElementAssociatedWithParts для элемента %s: %s",
@@ -218,6 +222,55 @@ def try_is_element_associated_with_parts(document, element_id):
             error,
         )
         return False, "ошибка при обращении к API Parts"
+
+
+def try_get_active_view_phase_id(document):
+    """Получить фазу активного вида с учетом разных версий API."""
+
+    if document is None:
+        return ElementId.InvalidElementId, "документ недоступен для чтения фазы вида"
+
+    view = getattr(document, "ActiveView", None)
+    if view is None:
+        return ElementId.InvalidElementId, "активный вид недоступен для чтения фазы"
+
+    _property_missing = object()
+    phase_id = _property_missing
+    try:
+        phase_id = getattr(view, "PhaseId")
+    except AttributeError:
+        phase_id = _property_missing
+    except BaseException as error:  # noqa: BLE001
+        LOGGER.debug(
+            "Чтение свойства PhaseId у активного вида завершилось ошибкой: %s",
+            error,
+        )
+        phase_id = _property_missing
+
+    if phase_id is not _property_missing:
+        if isinstance(phase_id, ElementId):
+            return phase_id, ""
+        if phase_id is not None:
+            LOGGER.debug(
+                "Свойство PhaseId активного вида вернуло значение неизвестного типа %s.",
+                type(phase_id),
+            )
+
+    parameter, message = try_get_element_parameter(view, "VIEW_PHASE")
+    if message:
+        return ElementId.InvalidElementId, message
+
+    if parameter and parameter.HasValue:
+        try:
+            return parameter.AsElementId(), ""
+        except Exception as error:  # noqa: BLE001
+            LOGGER.debug(
+                "Не удалось преобразовать параметр VIEW_PHASE активного вида в ElementId: %s",
+                error,
+            )
+            return ElementId.InvalidElementId, "ошибка чтения фазы активного вида"
+
+    return ElementId.InvalidElementId, "у активного вида не задана фаза"
 
 
 _MISSING_VALUE = object()
@@ -1384,16 +1437,6 @@ class WallLayerSplitterCommand(object):
             assembly_description = build_assembly_description(self.doc, assembly_id)
             self.add_blocking_reason(detected_reasons, "стена входит в сборку {}".format(assembly_description))
 
-        has_associated_parts, parts_check_message = try_is_element_associated_with_parts(
-            self.doc, wall.Id
-        )
-        if parts_check_message:
-            self.log_diagnostic(
-                "Проверка разбивки на части: {0}.".format(parts_check_message)
-            )
-        if has_associated_parts:
-            self.add_blocking_reason(detected_reasons, "стена разбита на части (Parts)")
-
         phase_created_param, phase_message = try_get_element_parameter(
             wall, "WALL_PHASE_CREATED"
         )
@@ -1406,7 +1449,14 @@ class WallLayerSplitterCommand(object):
             )
         elif phase_created_param and phase_created_param.HasValue:
             phase_created_id = phase_created_param.AsElementId()
-            active_phase_id = self.doc.ActiveView.PhaseId if self.doc.ActiveView else ElementId.InvalidElementId
+            active_phase_id, active_phase_message = try_get_active_view_phase_id(self.doc)
+            if active_phase_message:
+                self.log_diagnostic(
+                    "Стена {0}: {1}.".format(
+                        format_element_id(wall.Id),
+                        active_phase_message,
+                    )
+                )
             if active_phase_id != ElementId.InvalidElementId and active_phase_id != phase_created_id:
                 phase_description = build_phase_description(self.doc, phase_created_id)
                 description = "стена создана в фазе {}, отличной от фазы активного вида".format(phase_description)
