@@ -56,6 +56,46 @@ MAX_LAYER_TYPE_NAME_LENGTH = 200
 MAX_LAYER_TYPE_NAME_ATTEMPTS = 50
 
 
+def get_element_id_value(element_id):
+    if isinstance(element_id, ElementId):
+        try:
+            return element_id.IntegerValue
+        except Exception:  # noqa: BLE001
+            try:
+                return int(element_id)
+            except Exception:  # noqa: BLE001
+                return None
+    if isinstance(element_id, int):
+        return element_id
+    try:
+        return int(element_id)
+    except (TypeError, ValueError):
+        return None
+
+
+def format_element_id(element_id, fallback_value=None):
+    if fallback_value is not None:
+        try:
+            return str(int(fallback_value))
+        except (TypeError, ValueError):
+            return str(fallback_value)
+
+    value = get_element_id_value(element_id)
+    if value is not None:
+        return str(value)
+
+    if isinstance(element_id, ElementId):
+        try:
+            return str(element_id.IntegerValue)
+        except Exception:  # noqa: BLE001
+            pass
+
+    if element_id is None:
+        return "неизвестно"
+
+    return str(element_id)
+
+
 class WallLocationReference(enum.IntEnum):
     WALL_CENTERLINE = 0
     CORE_CENTERLINE = 1
@@ -80,8 +120,21 @@ class LayerWallInfo(object):
 
 
 class WallSplitResult(object):
-    def __init__(self, original_wall_id, created_walls, rehosted_instances, unmatched_instances, failed_detach_instances):
+    def __init__(
+        self,
+        original_wall_id,
+        created_walls,
+        rehosted_instances,
+        unmatched_instances,
+        failed_detach_instances,
+        original_wall_id_value=None,
+    ):
         self.original_wall_id = original_wall_id
+        self.original_wall_id_value = (
+            original_wall_id_value
+            if original_wall_id_value is not None
+            else get_element_id_value(original_wall_id)
+        )
         self.created_wall_ids = created_walls or []
         self.rehosted_instance_ids = rehosted_instances or []
         self.unmatched_instance_ids = unmatched_instances or []
@@ -250,21 +303,28 @@ class WallLayerSplitterCommand(object):
             LOGGER.debug("SplitWall: передана пустая стена.")
             return None
 
-        wall_id = wall.Id.IntegerValue
-        self.log_diagnostic("Стена {0}: сбор исходных данных.".format(wall_id))
+        original_wall_id = wall.Id
+        wall_id_value = get_element_id_value(original_wall_id)
+        wall_label = format_element_id(original_wall_id, wall_id_value)
+        self.log_diagnostic("Стена {0}: сбор исходных данных.".format(wall_label))
 
         structure = wall.WallType.GetCompoundStructure() if wall.WallType else None
         if not structure or structure.LayerCount <= 1:
-            LOGGER.debug("SplitWall: стена %s пропущена — состав конструкции отсутствует или один слой.", wall_id)
+            LOGGER.debug(
+                "SplitWall: стена %s пропущена — состав конструкции отсутствует или один слой.",
+                wall_label,
+            )
             self.log_diagnostic(
-                "Стена {0}: пропущена — нет составной конструкции или один слой.".format(wall_id)
+                "Стена {0}: пропущена — нет составной конструкции или один слой.".format(wall_label)
             )
             return None
 
         location = wall.Location
         if not isinstance(location, LocationCurve) or location.Curve is None:
-            LOGGER.debug("SplitWall: стена %s не имеет LocationCurve.", wall_id)
-            self.log_diagnostic("Стена {0}: отсутствует геометрия LocationCurve.".format(wall_id))
+            LOGGER.debug("SplitWall: стена %s не имеет LocationCurve.", wall_label)
+            self.log_diagnostic(
+                "Стена {0}: отсутствует геометрия LocationCurve.".format(wall_label)
+            )
             return None
 
         hosted_family_ids = wall.GetDependentElements(ElementClassFilter(FamilyInstance))
@@ -280,9 +340,15 @@ class WallLayerSplitterCommand(object):
                 else:
                     delete_reason = "не удалось временно отвязать семейства: {}".format(failed_list)
             self.restore_family_instances_to_host(detached_instances, wall)
-            self.report_skip_reason(wall.Id, "невозможно удалить исходную стену: {}".format(delete_reason))
+            self.report_skip_reason(
+                original_wall_id,
+                "невозможно удалить исходную стену: {}".format(delete_reason),
+            )
             self.log_diagnostic(
-                "Стена {0}: невозможно удалить исходную стену ({1}).".format(wall_id, delete_reason or "неизвестная причина")
+                "Стена {0}: невозможно удалить исходную стену ({1}).".format(
+                    wall_label,
+                    delete_reason or "неизвестная причина",
+                )
             )
             return None
 
@@ -317,7 +383,7 @@ class WallLayerSplitterCommand(object):
             layer_type = self.get_or_create_layer_type(wall.WallType, layer, index)
             self.log_diagnostic(
                 "Стена {0}: обработка слоя {1}, толщина {2:.3f}.".format(
-                    wall_id, index + 1, layer.Width
+                    wall_label, index + 1, layer.Width
                 )
             )
             layer_center_offset = self.calculate_layer_center_offset(layers, index, exterior_face_offset)
@@ -342,28 +408,40 @@ class WallLayerSplitterCommand(object):
             layer_infos.append(LayerWallInfo(new_wall, layer, index, layer_offset_from_reference))
 
         if not created_walls:
-            TaskDialog.Show("Разделение слоев стен", "Не удалось создать новые стены для исходной стены {}.".format(wall_id))
+            TaskDialog.Show(
+                "Разделение слоев стен",
+                "Не удалось создать новые стены для исходной стены {}.".format(wall_label),
+            )
             self.restore_family_instances_to_host(detached_instances, wall)
-            self.log_diagnostic("Стена {0}: новые стены не созданы.".format(wall_id))
+            self.log_diagnostic("Стена {0}: новые стены не созданы.".format(wall_label))
             return None
 
         try:
-            self.log_diagnostic("Стена {0}: удаление исходной стены.".format(wall_id))
-            self.doc.Delete(wall.Id)
+            self.log_diagnostic("Стена {0}: удаление исходной стены.".format(wall_label))
+            self.doc.Delete(original_wall_id)
         except InvalidOperationException as ex:
             self.restore_family_instances_to_host(detached_instances, wall)
             raise InvalidOperationException(
-                "Не удалось удалить исходную стену (ID: {}). Подробности: {}".format(wall_id, ex.Message)
-        )
+                "Не удалось удалить исходную стену (ID: {}). Подробности: {}".format(
+                    wall_label,
+                    ex.Message,
+                )
+            )
         except ArgumentException as ex:
             self.restore_family_instances_to_host(detached_instances, wall)
             raise InvalidOperationException(
-                "Не удалось удалить исходную стену (ID: {}). Подробности: {}".format(wall_id, ex.Message)
+                "Не удалось удалить исходную стену (ID: {}). Подробности: {}".format(
+                    wall_label,
+                    ex.Message,
+                )
             )
         except Exception as ex:  # noqa: BLE001
             self.restore_family_instances_to_host(detached_instances, wall)
             raise InvalidOperationException(
-                "Не удалось удалить исходную стену (ID: {}). Подробности: {}".format(wall_id, ex)
+                "Не удалось удалить исходную стену (ID: {}). Подробности: {}".format(
+                    wall_label,
+                    ex,
+                )
             )
 
         rehosted_instances, unmatched_instances = self.rehost_family_instances(
@@ -374,11 +452,12 @@ class WallLayerSplitterCommand(object):
         )
 
         result = WallSplitResult(
-            wall.Id,
+            original_wall_id,
             created_walls,
             rehosted_instances,
             unmatched_instances,
             [element_id for element_id in failed_to_detach] if failed_to_detach else [],
+            wall_id_value,
         )
 
         return result
@@ -899,17 +978,21 @@ class WallLayerSplitterCommand(object):
 
             builder.append(
                 "Стена {0} -> создано {1} стен.".format(
-                    result.original_wall_id.IntegerValue if isinstance(result.original_wall_id, ElementId) else result.original_wall_id,
+                    format_element_id(result.original_wall_id, result.original_wall_id_value),
                     len(result.created_wall_ids),
                 )
             )
             if result.rehosted_instance_ids:
                 builder.append("    Перепривязано семейств: {0}.".format(len(result.rehosted_instance_ids)))
             if result.unmatched_instance_ids:
-                unmatched_list = ", ".join(str(e.IntegerValue) for e in result.unmatched_instance_ids)
+                unmatched_list = ", ".join(
+                    format_element_id(element_id) for element_id in result.unmatched_instance_ids
+                )
                 builder.append("    Не удалось перепривязать автоматически: {0}.".format(unmatched_list))
             if result.failed_detach_instance_ids:
-                failed_list = ", ".join(str(e.IntegerValue) for e in result.failed_detach_instance_ids)
+                failed_list = ", ".join(
+                    format_element_id(element_id) for element_id in result.failed_detach_instance_ids
+                )
                 builder.append("    Не удалось временно отвязать: {0}.".format(failed_list))
 
         if skipped_messages:
@@ -926,10 +1009,16 @@ class WallLayerSplitterCommand(object):
         if wall_id is None or not reason:
             return
         formatted = format_skip_reason(reason)
-        message = "Стена {0}: {1}".format(wall_id.IntegerValue if isinstance(wall_id, ElementId) else wall_id, formatted)
+        wall_label = format_element_id(wall_id)
+        message = "Стена {0}: {1}".format(wall_label, formatted)
         if message not in self.skip_messages:
             self.skip_messages.append(message)
-        self.log_diagnostic("Пропуск стены {0}: {1}".format(wall_id, formatted.replace("\n", " ")))
+        self.log_diagnostic(
+            "Пропуск стены {0}: {1}".format(
+                wall_label,
+                formatted.replace("\n", " "),
+            )
+        )
 
     def build_skip_details(self, skipped_messages):
         if not skipped_messages:
