@@ -234,7 +234,6 @@ def try_get_active_view_phase_id(document):
     if view is None:
         return ElementId.InvalidElementId, "активный вид недоступен для чтения фазы"
 
-
     _property_missing = object()
     phase_id = _property_missing
     try:
@@ -285,14 +284,31 @@ _BUILTIN_PARAMETER_FALLBACKS = {
 }
 
 
+def _safe_get_builtin_parameter(parameter_name):
+    try:
+        return getattr(BuiltInParameter, parameter_name), ""
+    except AttributeError:
+        return _MISSING_VALUE, ""
+    except Exception as error:  # noqa: BLE001
+        LOGGER.debug(
+            "Не удалось получить BuiltInParameter.%s: %s.",
+            parameter_name,
+            error,
+        )
+        return _MISSING_VALUE, "ошибка доступа к BuiltInParameter.{0}: {1}".format(
+            parameter_name,
+            error,
+        )
+
+
 def try_resolve_builtin_parameter(parameter_name):
-    value = getattr(BuiltInParameter, parameter_name, _MISSING_VALUE)
+    value, primary_message = _safe_get_builtin_parameter(parameter_name)
     if value is not _MISSING_VALUE:
         return value, ""
 
     fallback_names = _BUILTIN_PARAMETER_FALLBACKS.get(parameter_name, ())
     for fallback_name in fallback_names:
-        fallback_value = getattr(BuiltInParameter, fallback_name, _MISSING_VALUE)
+        fallback_value, fallback_message = _safe_get_builtin_parameter(fallback_name)
         if fallback_value is not _MISSING_VALUE:
             LOGGER.debug(
                 "BuiltInParameter.%s отсутствует, используется BuiltInParameter.%s.",
@@ -300,6 +316,15 @@ def try_resolve_builtin_parameter(parameter_name):
                 fallback_name,
             )
             return fallback_value, ""
+        if fallback_message:
+            LOGGER.debug(
+                "Не удалось использовать резервный BuiltInParameter.%s (%s).",
+                fallback_name,
+                fallback_message,
+            )
+
+    if primary_message:
+        return None, primary_message
 
     message = "API не содержит BuiltInParameter.{0}".format(parameter_name)
     LOGGER.debug(
