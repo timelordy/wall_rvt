@@ -252,7 +252,6 @@ def try_get_active_view_phase_id(document):
                 "Свойство PhaseId активного вида вернуло значение неизвестного типа %s.",
                 type(phase_id),
             )
-
     parameter, message = try_get_element_parameter(view, "VIEW_PHASE")
     if message:
         return ElementId.InvalidElementId, message
