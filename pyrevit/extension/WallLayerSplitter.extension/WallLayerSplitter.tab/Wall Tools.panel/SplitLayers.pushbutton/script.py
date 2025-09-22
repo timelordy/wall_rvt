@@ -5,6 +5,7 @@
 import enum
 import math
 import os
+import re
 import sys
 
 from Autodesk.Revit.DB import (
@@ -52,6 +53,38 @@ OUTPUT = script.get_output()
 
 MAX_LAYER_TYPE_NAME_LENGTH = 200
 MAX_LAYER_TYPE_NAME_ATTEMPTS = 50
+SAFE_LAYER_TYPE_BASE_NAME_LENGTH = 60
+
+
+def make_valid_wall_type_name(raw_name, max_length=SAFE_LAYER_TYPE_BASE_NAME_LENGTH, fallback_name="Тип слоя"):
+    """Очистить и безопасно обрезать имя типа стены."""
+
+    invalid_chars = {":", ";", "{", "}", "[", "]", "|", "\\", "/", "<", ">", "?", "*", '"'}
+    trimmed = (raw_name or "").strip()
+    if not trimmed:
+        trimmed = fallback_name
+
+    sanitized_chars = []
+    for char in trimmed:
+        code = ord(char)
+        if code < 32 or char in invalid_chars:
+            sanitized_chars.append("_")
+        else:
+            sanitized_chars.append(char)
+
+    sanitized = "".join(sanitized_chars)
+    sanitized = re.sub(r"\s+", " ", sanitized).strip()
+
+    if not sanitized:
+        sanitized = fallback_name
+
+    if max_length and len(sanitized) > max_length:
+        sanitized = sanitized[:max_length].rstrip()
+
+    if not sanitized:
+        sanitized = fallback_name
+
+    return sanitized
 
 
 def get_element_id_value(element_id):
@@ -520,40 +553,53 @@ class WallLayerSplitterCommand(object):
         name_map = self.get_wall_type_name_map()
 
         for attempt in range(1, MAX_LAYER_TYPE_NAME_ATTEMPTS + 1):
-            candidate_name = self.build_candidate_layer_type_name(base_name, attempt)
+            raw_candidate_name = self.build_candidate_layer_type_name(base_name, attempt)
+            candidate_name = make_valid_wall_type_name(
+                raw_candidate_name,
+                max_length=MAX_LAYER_TYPE_NAME_LENGTH,
+            )
             name_key = self.normalize_wall_type_name(candidate_name)
             if name_key in name_map:
                 LOGGER.debug(
-                    "Тип стены с именем '%s' уже существует, попытка %s пропущена.",
+                    "Тип стены с именем '%s' (исходно '%s') уже существует, попытка %s пропущена.",
                     candidate_name,
+                    raw_candidate_name,
                     attempt,
                 )
                 self.log_diagnostic(
-                    "  Слой {0}: имя \"{1}\" уже занято (попытка {2}).".format(
-                        layer_index + 1, candidate_name, attempt
+                    "  Слой {0}: имя \"{1}\" → \"{2}\" уже занято (попытка {3}).".format(
+                        layer_index + 1,
+                        raw_candidate_name,
+                        candidate_name,
+                        attempt,
                     )
                 )
                 continue
 
             try:
                 self.log_diagnostic(
-                    "  Слой {0}: попытка {1} создать тип \"{2}\".".format(
-                        layer_index + 1, attempt, candidate_name
+                    "  Слой {0}: попытка {1} создать тип \"{2}\" (исходное \"{3}\").".format(
+                        layer_index + 1,
+                        attempt,
+                        candidate_name,
+                        raw_candidate_name,
                     )
                 )
                 duplicated = base_type.Duplicate(candidate_name)
 
             except (ArgumentException, InvalidOperationException) as error:
                 LOGGER.warning(
-                    "Не удалось создать тип стены '%s' (попытка %s): %s",
+                    "Не удалось создать тип стены '%s' (исходно '%s', попытка %s): %s",
                     candidate_name,
+                    raw_candidate_name,
                     attempt,
                     error,
                 )
                 self.log_diagnostic(
-                    "  Слой {0}: ошибка при создании типа \"{1}\" (попытка {2}) — {3}.".format(
+                    "  Слой {0}: ошибка при создании типа \"{1}\" (из \"{2}\", попытка {3}) — {4}.".format(
                         layer_index + 1,
                         candidate_name,
+                        raw_candidate_name,
                         attempt,
                         self.extract_error_message(error),
                     )
@@ -582,16 +628,17 @@ class WallLayerSplitterCommand(object):
         raise InvalidOperationException(message)
 
     def prepare_layer_type_base_name(self, desired_name):
-        base_name = (desired_name or "").strip()
-        if not base_name:
-            base_name = "Тип слоя"
-        if len(base_name) > MAX_LAYER_TYPE_NAME_LENGTH:
+        raw_name = (desired_name or "").strip()
+        base_name = make_valid_wall_type_name(
+            raw_name,
+            max_length=SAFE_LAYER_TYPE_BASE_NAME_LENGTH,
+        )
+        if base_name != raw_name:
             LOGGER.debug(
-                "Имя типа слоя превышает %s символов, выполняется обрезка: %s",
-                MAX_LAYER_TYPE_NAME_LENGTH,
+                "Базовое имя типа слоя скорректировано: '%s' → '%s'",
+                raw_name,
                 base_name,
             )
-            base_name = base_name[:MAX_LAYER_TYPE_NAME_LENGTH].rstrip()
         return base_name
 
     def build_candidate_layer_type_name(self, base_name, attempt):
@@ -1139,7 +1186,8 @@ class WallLayerSplitterCommand(object):
             sanitize_name_component(material_name),
             "{0:.0f}мм".format(width_mm),
         ]
-        return " - ".join([part for part in components if part])
+        raw_name = " - ".join([part for part in components if part])
+        return make_valid_wall_type_name(raw_name)
 
 
 DEFAULT_PARAMETERS_TO_COPY = []
