@@ -394,7 +394,8 @@ class WallLayerSplitterCommand(object):
 
             try:
                 duplicated = base_type.Duplicate(candidate_name)
-            except ArgumentException as error:
+
+            except (ArgumentException, InvalidOperationException) as error:
                 LOGGER.warning(
                     "Не удалось создать тип стены '%s' (попытка %s): %s",
                     candidate_name,
