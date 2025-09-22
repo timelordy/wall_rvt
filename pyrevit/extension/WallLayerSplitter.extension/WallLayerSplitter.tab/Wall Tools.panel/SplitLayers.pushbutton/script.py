@@ -234,6 +234,7 @@ def try_get_active_view_phase_id(document):
     if view is None:
         return ElementId.InvalidElementId, "активный вид недоступен для чтения фазы"
 
+
     _property_missing = object()
     phase_id = _property_missing
     try:
