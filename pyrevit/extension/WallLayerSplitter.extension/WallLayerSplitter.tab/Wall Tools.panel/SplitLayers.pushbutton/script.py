@@ -200,17 +200,21 @@ def try_is_element_associated_with_parts(document, element_id):
         LOGGER.debug(
             "PartUtils.IsElementAssociatedWithParts недоступен в текущей версии API."
         )
-        return False, "API не поддерживает проверку разбивки на части"
+        return False, ""
 
     try:
         return bool(method(document, element_id)), ""
     except (InvalidOperationException, ArgumentException):
-        return False, "API отклонило проверку разбивки на части"
+        LOGGER.debug(
+            "API отклонило проверку привязки к частям для элемента %s.",
+            element_id,
+        )
+        return False, ""
     except AttributeError:
         LOGGER.debug(
             "PartUtils.IsElementAssociatedWithParts отсутствует у типа PartUtils."
         )
-        return False, "API не содержит метод проверки разбивки на части"
+        return False, ""
     except Exception as error:  # noqa: BLE001
         LOGGER.debug(
             "Не удалось выполнить PartUtils.IsElementAssociatedWithParts для элемента %s: %s",
@@ -218,6 +222,55 @@ def try_is_element_associated_with_parts(document, element_id):
             error,
         )
         return False, "ошибка при обращении к API Parts"
+
+
+def try_get_active_view_phase_id(document):
+    """Получить фазу активного вида с учетом разных версий API."""
+
+    if document is None:
+        return ElementId.InvalidElementId, "документ недоступен для чтения фазы вида"
+
+    view = getattr(document, "ActiveView", None)
+    if view is None:
+        return ElementId.InvalidElementId, "активный вид недоступен для чтения фазы"
+
+    _property_missing = object()
+    phase_id = _property_missing
+    try:
+        phase_id = getattr(view, "PhaseId")
+    except AttributeError:
+        phase_id = _property_missing
+    except BaseException as error:  # noqa: BLE001
+        LOGGER.debug(
+            "Чтение свойства PhaseId у активного вида завершилось ошибкой: %s",
+            error,
+        )
+        phase_id = _property_missing
+
+    if phase_id is not _property_missing:
+        if isinstance(phase_id, ElementId):
+            return phase_id, ""
+        if phase_id is not None:
+            LOGGER.debug(
+                "Свойство PhaseId активного вида вернуло значение неизвестного типа %s.",
+                type(phase_id),
+            )
+
+    parameter, message = try_get_element_parameter(view, "VIEW_PHASE")
+    if message:
+        return ElementId.InvalidElementId, message
+
+    if parameter and parameter.HasValue:
+        try:
+            return parameter.AsElementId(), ""
+        except Exception as error:  # noqa: BLE001
+            LOGGER.debug(
+                "Не удалось преобразовать параметр VIEW_PHASE активного вида в ElementId: %s",
+                error,
+            )
+            return ElementId.InvalidElementId, "ошибка чтения фазы активного вида"
+
+    return ElementId.InvalidElementId, "у активного вида не задана фаза"
 
 
 _MISSING_VALUE = object()
@@ -231,14 +284,31 @@ _BUILTIN_PARAMETER_FALLBACKS = {
 }
 
 
+def _safe_get_builtin_parameter(parameter_name):
+    try:
+        return getattr(BuiltInParameter, parameter_name), ""
+    except AttributeError:
+        return _MISSING_VALUE, ""
+    except Exception as error:  # noqa: BLE001
+        LOGGER.debug(
+            "Не удалось получить BuiltInParameter.%s: %s.",
+            parameter_name,
+            error,
+        )
+        return _MISSING_VALUE, "ошибка доступа к BuiltInParameter.{0}: {1}".format(
+            parameter_name,
+            error,
+        )
+
+
 def try_resolve_builtin_parameter(parameter_name):
-    value = getattr(BuiltInParameter, parameter_name, _MISSING_VALUE)
+    value, primary_message = _safe_get_builtin_parameter(parameter_name)
     if value is not _MISSING_VALUE:
         return value, ""
 
     fallback_names = _BUILTIN_PARAMETER_FALLBACKS.get(parameter_name, ())
     for fallback_name in fallback_names:
-        fallback_value = getattr(BuiltInParameter, fallback_name, _MISSING_VALUE)
+        fallback_value, fallback_message = _safe_get_builtin_parameter(fallback_name)
         if fallback_value is not _MISSING_VALUE:
             LOGGER.debug(
                 "BuiltInParameter.%s отсутствует, используется BuiltInParameter.%s.",
@@ -246,6 +316,15 @@ def try_resolve_builtin_parameter(parameter_name):
                 fallback_name,
             )
             return fallback_value, ""
+        if fallback_message:
+            LOGGER.debug(
+                "Не удалось использовать резервный BuiltInParameter.%s (%s).",
+                fallback_name,
+                fallback_message,
+            )
+
+    if primary_message:
+        return None, primary_message
 
     message = "API не содержит BuiltInParameter.{0}".format(parameter_name)
     LOGGER.debug(
@@ -302,6 +381,44 @@ def try_get_parameter_value(element, parameter_name, extractor, description=None
         if description:
             return None, "не удалось прочитать {0}: {1}".format(description, error)
         return None, "не удалось прочитать BuiltInParameter.{0}: {1}".format(parameter_name, error)
+
+
+def safe_get_name(entity):
+    """Безопасно получить свойство Name у объектов Revit API."""
+
+    if entity is None:
+        return ""
+
+    try:
+        value = getattr(entity, "Name")
+    except AttributeError:
+        return ""
+    except Exception as error:  # noqa: BLE001
+        LOGGER.debug(
+            "Не удалось получить свойство Name у объекта типа %s: %s",
+            type(entity).__name__,
+            error,
+        )
+        return ""
+
+    try:
+        if callable(value):
+            value = value()
+    except Exception as error:  # noqa: BLE001
+        LOGGER.debug(
+            "Не удалось вычислить значение свойства Name у объекта типа %s: %s",
+            type(entity).__name__,
+            error,
+        )
+        return ""
+
+    if not value:
+        return ""
+
+    try:
+        return str(value).strip()
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 class WallLocationReference(enum.IntEnum):
@@ -1384,16 +1501,6 @@ class WallLayerSplitterCommand(object):
             assembly_description = build_assembly_description(self.doc, assembly_id)
             self.add_blocking_reason(detected_reasons, "стена входит в сборку {}".format(assembly_description))
 
-        has_associated_parts, parts_check_message = try_is_element_associated_with_parts(
-            self.doc, wall.Id
-        )
-        if parts_check_message:
-            self.log_diagnostic(
-                "Проверка разбивки на части: {0}.".format(parts_check_message)
-            )
-        if has_associated_parts:
-            self.add_blocking_reason(detected_reasons, "стена разбита на части (Parts)")
-
         phase_created_param, phase_message = try_get_element_parameter(
             wall, "WALL_PHASE_CREATED"
         )
@@ -1406,7 +1513,14 @@ class WallLayerSplitterCommand(object):
             )
         elif phase_created_param and phase_created_param.HasValue:
             phase_created_id = phase_created_param.AsElementId()
-            active_phase_id = self.doc.ActiveView.PhaseId if self.doc.ActiveView else ElementId.InvalidElementId
+            active_phase_id, active_phase_message = try_get_active_view_phase_id(self.doc)
+            if active_phase_message:
+                self.log_diagnostic(
+                    "Стена {0}: {1}.".format(
+                        format_element_id(wall.Id),
+                        active_phase_message,
+                    )
+                )
             if active_phase_id != ElementId.InvalidElementId and active_phase_id != phase_created_id:
                 phase_description = build_phase_description(self.doc, phase_created_id)
                 description = "стена создана в фазе {}, отличной от фазы активного вида".format(phase_description)
@@ -1637,8 +1751,10 @@ class WallLayerSplitterCommand(object):
         material_name = "Без материала"
         if layer.MaterialId != ElementId.InvalidElementId:
             material = base_type.Document.GetElement(layer.MaterialId)
-            if isinstance(material, Material) and material.Name:
-                material_name = material.Name
+            if isinstance(material, Material):
+                material_value = safe_get_name(material)
+                if material_value:
+                    material_name = material_value
         millimeters_per_foot = 304.8
         width_mm = layer.Width * millimeters_per_foot
         components = [
@@ -1878,9 +1994,10 @@ def is_owned_by_another_user(owner_name, current_username):
 def build_element_description(element):
     if element is None:
         return "неизвестный элемент"
-    category_name = element.Category.Name if element.Category else ""
-    element_name = element.Name or ""
-    identifier = element.Id.IntegerValue
+    category = getattr(element, "Category", None)
+    category_name = safe_get_name(category)
+    element_name = safe_get_name(element)
+    identifier = get_element_id_value(getattr(element, "Id", None)) or 0
     if category_name and element_name:
         return "{0} \"{1}\" (ID {2})".format(category_name, element_name, identifier)
     if element_name:
@@ -1912,8 +2029,10 @@ def build_design_option_description(document, design_option_id):
         identifier = design_option_id.IntegerValue if isinstance(design_option_id, ElementId) else 0
         return "ID {0}".format(identifier)
     element = document.GetElement(design_option_id)
-    if isinstance(element, DesignOption) and element.Name:
-        return '\"{0}\" (ID {1})'.format(element.Name, design_option_id.IntegerValue)
+    if isinstance(element, DesignOption):
+        option_name = safe_get_name(element)
+        if option_name:
+            return '\"{0}\" (ID {1})'.format(option_name, design_option_id.IntegerValue)
     return "ID {0}".format(design_option_id.IntegerValue)
 
 
@@ -1922,8 +2041,10 @@ def build_assembly_description(document, assembly_id):
         identifier = assembly_id.IntegerValue if isinstance(assembly_id, ElementId) else 0
         return "ID {0}".format(identifier)
     element = document.GetElement(assembly_id)
-    if isinstance(element, AssemblyInstance) and element.Name:
-        return '\"{0}\" (ID {1})'.format(element.Name, assembly_id.IntegerValue)
+    if isinstance(element, AssemblyInstance):
+        assembly_name = safe_get_name(element)
+        if assembly_name:
+            return '\"{0}\" (ID {1})'.format(assembly_name, assembly_id.IntegerValue)
     return "ID {0}".format(assembly_id.IntegerValue)
 
 
@@ -1932,8 +2053,10 @@ def build_phase_description(document, phase_id):
         identifier = phase_id.IntegerValue if isinstance(phase_id, ElementId) else 0
         return "ID {0}".format(identifier)
     element = document.GetElement(phase_id)
-    if isinstance(element, Phase) and element.Name:
-        return '\"{0}\" (ID {1})'.format(element.Name, phase_id.IntegerValue)
+    if isinstance(element, Phase):
+        phase_name = safe_get_name(element)
+        if phase_name:
+            return '\"{0}\" (ID {1})'.format(phase_name, phase_id.IntegerValue)
     return "ID {0}".format(phase_id.IntegerValue)
 
 
