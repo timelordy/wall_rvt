@@ -189,6 +189,95 @@ def try_get_wall_type(document, wall):
         return None
 
 
+def try_is_element_associated_with_parts(document, element_id):
+    """Безопасно проверить привязку элемента к частям (Parts)."""
+
+    if document is None or element_id is None:
+        return False, "не удалось получить документ или идентификатор элемента"
+
+    method = getattr(PartUtils, "IsElementAssociatedWithParts", None)
+    if method is None:
+        LOGGER.debug(
+            "PartUtils.IsElementAssociatedWithParts недоступен в текущей версии API."
+        )
+        return False, "API не поддерживает проверку разбивки на части"
+
+    try:
+        return bool(method(document, element_id)), ""
+    except (InvalidOperationException, ArgumentException):
+        return False, "API отклонило проверку разбивки на части"
+    except AttributeError:
+        LOGGER.debug(
+            "PartUtils.IsElementAssociatedWithParts отсутствует у типа PartUtils."
+        )
+        return False, "API не содержит метод проверки разбивки на части"
+    except Exception as error:  # noqa: BLE001
+        LOGGER.debug(
+            "Не удалось выполнить PartUtils.IsElementAssociatedWithParts для элемента %s: %s",
+            element_id,
+            error,
+        )
+        return False, "ошибка при обращении к API Parts"
+
+
+_MISSING_VALUE = object()
+
+
+def try_resolve_builtin_parameter(parameter_name):
+    value = getattr(BuiltInParameter, parameter_name, _MISSING_VALUE)
+    if value is _MISSING_VALUE:
+        message = "API не содержит BuiltInParameter.{0}".format(parameter_name)
+        LOGGER.debug(
+            "BuiltInParameter.%s отсутствует в текущей версии API.", parameter_name
+        )
+        return None, message
+    return value, ""
+
+
+def try_get_element_parameter(element, parameter_name):
+    built_in_parameter, message = try_resolve_builtin_parameter(parameter_name)
+    if message:
+        return None, message
+
+    if element is None:
+        return None, "элемент отсутствует для BuiltInParameter.{0}".format(parameter_name)
+
+    try:
+        parameter = element.get_Parameter(built_in_parameter)
+    except Exception as error:  # noqa: BLE001
+        element_id = getattr(element, "Id", None)
+        LOGGER.debug(
+            "Не удалось получить параметр %s у элемента %s: %s",
+            parameter_name,
+            format_element_id(element_id) if element_id is not None else "<неизвестно>",
+            error,
+        )
+        return None, "ошибка доступа к BuiltInParameter.{0}: {1}".format(parameter_name, error)
+
+    if parameter is None:
+        return None, "элемент не содержит BuiltInParameter.{0}".format(parameter_name)
+
+    return parameter, ""
+
+
+def try_get_parameter_value(element, parameter_name, extractor, description=None):
+    parameter, message = try_get_element_parameter(element, parameter_name)
+    if message:
+        return None, message
+
+    try:
+        return extractor(parameter), ""
+    except Exception as error:  # noqa: BLE001
+        LOGGER.debug(
+            "Не удалось прочитать значение параметра %s: %s",
+            parameter_name,
+            error,
+        )
+        if description:
+            return None, "не удалось прочитать {0}: {1}".format(description, error)
+        return None, "не удалось прочитать BuiltInParameter.{0}: {1}".format(parameter_name, error)
+
+
 class WallLocationReference(enum.IntEnum):
     WALL_CENTERLINE = 0
     CORE_CENTERLINE = 1
@@ -500,13 +589,139 @@ class WallLayerSplitterCommand(object):
         else:
             orientation = orientation.Normalize()
 
-        base_level_id = wall.get_Parameter(BuiltInParameter.WALL_BASE_CONSTRAINT).AsElementId()
-        base_offset = wall.get_Parameter(BuiltInParameter.WALL_BASE_OFFSET).AsDouble()
-        top_constraint_id = wall.get_Parameter(BuiltInParameter.WALL_HEIGHT_TYPE).AsElementId()
-        top_offset = wall.get_Parameter(BuiltInParameter.WALL_TOP_OFFSET).AsDouble()
-        unconnected_height = wall.get_Parameter(BuiltInParameter.WALL_USER_HEIGHT_PARAM).AsDouble()
-        is_structural = wall.get_Parameter(BuiltInParameter.WALL_STRUCTURAL_SIGNIFICANT).AsInteger() == 1
-        location_line = wall.get_Parameter(BuiltInParameter.WALL_KEY_REF_PARAM).AsInteger()
+        base_level_id, base_level_message = try_get_parameter_value(
+            wall,
+            "WALL_BASE_CONSTRAINT",
+            lambda param: param.AsElementId(),
+            "уровень основания стены",
+        )
+        if base_level_message:
+            self.restore_family_instances_to_host(detached_instances, wall)
+            skip_reason = "не удалось получить уровень основания: {0}".format(base_level_message)
+            self.report_skip_reason(original_wall_id, skip_reason)
+            self.log_diagnostic(
+                "Стена {0}: {1}.".format(
+                    wall_label,
+                    skip_reason,
+                )
+            )
+            return None
+
+        base_offset, base_offset_message = try_get_parameter_value(
+            wall,
+            "WALL_BASE_OFFSET",
+            lambda param: param.AsDouble(),
+            "смещение основания стены",
+        )
+        if base_offset_message:
+            self.restore_family_instances_to_host(detached_instances, wall)
+            skip_reason = "не удалось получить смещение основания: {0}".format(base_offset_message)
+            self.report_skip_reason(original_wall_id, skip_reason)
+            self.log_diagnostic(
+                "Стена {0}: {1}.".format(
+                    wall_label,
+                    skip_reason,
+                )
+            )
+            return None
+
+        top_constraint_id, top_constraint_message = try_get_parameter_value(
+            wall,
+            "WALL_HEIGHT_TYPE",
+            lambda param: param.AsElementId(),
+            "верхнее ограничение стены",
+        )
+        if top_constraint_message:
+            self.restore_family_instances_to_host(detached_instances, wall)
+            skip_reason = "не удалось получить верхнее ограничение: {0}".format(top_constraint_message)
+            self.report_skip_reason(original_wall_id, skip_reason)
+            self.log_diagnostic(
+                "Стена {0}: {1}.".format(
+                    wall_label,
+                    skip_reason,
+                )
+            )
+            return None
+
+        top_offset, top_offset_message = try_get_parameter_value(
+            wall,
+            "WALL_TOP_OFFSET",
+            lambda param: param.AsDouble(),
+            "смещение верхнего ограничения",
+        )
+        if top_offset_message:
+            self.restore_family_instances_to_host(detached_instances, wall)
+            skip_reason = "не удалось получить смещение верха: {0}".format(top_offset_message)
+            self.report_skip_reason(original_wall_id, skip_reason)
+            self.log_diagnostic(
+                "Стена {0}: {1}.".format(
+                    wall_label,
+                    skip_reason,
+                )
+            )
+            return None
+
+        unconnected_height, unconnected_height_message = try_get_parameter_value(
+            wall,
+            "WALL_USER_HEIGHT_PARAM",
+            lambda param: param.AsDouble(),
+            "высоту несвязанной стены",
+        )
+        if unconnected_height_message:
+            self.restore_family_instances_to_host(detached_instances, wall)
+            skip_reason = "не удалось получить высоту несвязанной стены: {0}".format(
+                unconnected_height_message
+            )
+            self.report_skip_reason(original_wall_id, skip_reason)
+            self.log_diagnostic(
+                "Стена {0}: {1}.".format(
+                    wall_label,
+                    skip_reason,
+                )
+            )
+            return None
+
+        is_structural_value, is_structural_message = try_get_parameter_value(
+            wall,
+            "WALL_STRUCTURAL_SIGNIFICANT",
+            lambda param: param.AsInteger(),
+            "флаг несущей стены",
+        )
+        if is_structural_message:
+            self.restore_family_instances_to_host(detached_instances, wall)
+            skip_reason = "не удалось получить признак несущей стены: {0}".format(
+                is_structural_message
+            )
+            self.report_skip_reason(original_wall_id, skip_reason)
+            self.log_diagnostic(
+                "Стена {0}: {1}.".format(
+                    wall_label,
+                    skip_reason,
+                )
+            )
+            return None
+        is_structural = is_structural_value == 1
+
+        location_line_value, location_line_message = try_get_parameter_value(
+            wall,
+            "WALL_KEY_REF_PARAM",
+            lambda param: param.AsInteger(),
+            "привязку Location Line",
+        )
+        if location_line_message:
+            self.restore_family_instances_to_host(detached_instances, wall)
+            skip_reason = "не удалось получить привязку Location Line: {0}".format(
+                location_line_message
+            )
+            self.report_skip_reason(original_wall_id, skip_reason)
+            self.log_diagnostic(
+                "Стена {0}: {1}.".format(
+                    wall_label,
+                    skip_reason,
+                )
+            )
+            return None
+        location_line = location_line_value
 
         layers = structure.GetLayers()
         wall_location_line = self.resolve_wall_location_line(location_line)
@@ -855,24 +1070,98 @@ class WallLayerSplitterCommand(object):
     ):
         new_wall = Wall.Create(self.doc, curve, wall_type.Id, base_level_id, unconnected_height, base_offset, flipped, structural)
 
-        top_constraint_param = new_wall.get_Parameter(BuiltInParameter.WALL_HEIGHT_TYPE)
-        if top_constraint_id != ElementId.InvalidElementId:
-            try_set_parameter(top_constraint_param, lambda: top_constraint_param.Set(top_constraint_id))
-        else:
-            unconnected_height_param = new_wall.get_Parameter(BuiltInParameter.WALL_USER_HEIGHT_PARAM)
-            try_set_parameter(unconnected_height_param, lambda: unconnected_height_param.Set(unconnected_height))
+        new_wall_label = format_element_id(new_wall.Id)
 
-        top_offset_param = new_wall.get_Parameter(BuiltInParameter.WALL_TOP_OFFSET)
-        try_set_parameter(top_offset_param, lambda: top_offset_param.Set(top_offset))
+        top_constraint_param, top_constraint_message = try_get_element_parameter(
+            new_wall, "WALL_HEIGHT_TYPE"
+        )
+        if top_constraint_message:
+            self.log_diagnostic(
+                "  Новая стена {0}: параметр WALL_HEIGHT_TYPE недоступен ({1}).".format(
+                    new_wall_label,
+                    top_constraint_message,
+                )
+            )
+        elif top_constraint_param:
+            if top_constraint_id != ElementId.InvalidElementId:
+                try_set_parameter(
+                    top_constraint_param,
+                    lambda: top_constraint_param.Set(top_constraint_id),
+                )
+            else:
+                unconnected_height_param, unconnected_height_message = try_get_element_parameter(
+                    new_wall, "WALL_USER_HEIGHT_PARAM"
+                )
+                if unconnected_height_message:
+                    self.log_diagnostic(
+                        "  Новая стена {0}: параметр WALL_USER_HEIGHT_PARAM недоступен ({1}).".format(
+                            new_wall_label,
+                            unconnected_height_message,
+                        )
+                    )
+                elif unconnected_height_param:
+                    try_set_parameter(
+                        unconnected_height_param,
+                        lambda: unconnected_height_param.Set(unconnected_height),
+                    )
 
-        base_offset_param = new_wall.get_Parameter(BuiltInParameter.WALL_BASE_OFFSET)
-        try_set_parameter(base_offset_param, lambda: base_offset_param.Set(base_offset))
+        top_offset_param, top_offset_message = try_get_element_parameter(
+            new_wall, "WALL_TOP_OFFSET"
+        )
+        if top_offset_message:
+            self.log_diagnostic(
+                "  Новая стена {0}: параметр WALL_TOP_OFFSET недоступен ({1}).".format(
+                    new_wall_label,
+                    top_offset_message,
+                )
+            )
+        elif top_offset_param:
+            try_set_parameter(top_offset_param, lambda: top_offset_param.Set(top_offset))
 
-        base_constraint_param = new_wall.get_Parameter(BuiltInParameter.WALL_BASE_CONSTRAINT)
-        try_set_parameter(base_constraint_param, lambda: base_constraint_param.Set(base_level_id))
+        base_offset_param, base_offset_message = try_get_element_parameter(
+            new_wall, "WALL_BASE_OFFSET"
+        )
+        if base_offset_message:
+            self.log_diagnostic(
+                "  Новая стена {0}: параметр WALL_BASE_OFFSET недоступен ({1}).".format(
+                    new_wall_label,
+                    base_offset_message,
+                )
+            )
+        elif base_offset_param:
+            try_set_parameter(base_offset_param, lambda: base_offset_param.Set(base_offset))
 
-        location_line_param = new_wall.get_Parameter(BuiltInParameter.WALL_KEY_REF_PARAM)
-        try_set_parameter(location_line_param, lambda: location_line_param.Set(location_line))
+        base_constraint_param, base_constraint_message = try_get_element_parameter(
+            new_wall, "WALL_BASE_CONSTRAINT"
+        )
+        if base_constraint_message:
+            self.log_diagnostic(
+                "  Новая стена {0}: параметр WALL_BASE_CONSTRAINT недоступен ({1}).".format(
+                    new_wall_label,
+                    base_constraint_message,
+                )
+            )
+        elif base_constraint_param:
+            try_set_parameter(
+                base_constraint_param,
+                lambda: base_constraint_param.Set(base_level_id),
+            )
+
+        location_line_param, location_line_message = try_get_element_parameter(
+            new_wall, "WALL_KEY_REF_PARAM"
+        )
+        if location_line_message:
+            self.log_diagnostic(
+                "  Новая стена {0}: параметр WALL_KEY_REF_PARAM недоступен ({1}).".format(
+                    new_wall_label,
+                    location_line_message,
+                )
+            )
+        elif location_line_param:
+            try_set_parameter(
+                location_line_param,
+                lambda: location_line_param.Set(location_line),
+            )
 
         return new_wall
 
@@ -921,7 +1210,19 @@ class WallLayerSplitterCommand(object):
             if not is_hosted_by_wall(family_instance, wall.Id):
                 continue
 
-            host_parameter = family_instance.get_Parameter(BuiltInParameter.HOST_ID_PARAM)
+            host_parameter, host_message = try_get_element_parameter(
+                family_instance, "HOST_ID_PARAM"
+            )
+            if host_message:
+                failed_to_detach.append(hosted_id)
+                self.log_diagnostic(
+                    "    Семейство {0}: параметр HOST_ID_PARAM недоступен ({1}).".format(
+                        format_element_id(hosted_id),
+                        host_message,
+                    )
+                )
+                continue
+
             if host_parameter is None or host_parameter.IsReadOnly:
                 failed_to_detach.append(hosted_id)
                 continue
@@ -1057,16 +1358,27 @@ class WallLayerSplitterCommand(object):
             assembly_description = build_assembly_description(self.doc, assembly_id)
             self.add_blocking_reason(detected_reasons, "стена входит в сборку {}".format(assembly_description))
 
-        has_associated_parts = False
-        try:
-            has_associated_parts = PartUtils.IsElementAssociatedWithParts(self.doc, wall.Id)
-        except (InvalidOperationException, ArgumentException):
-            has_associated_parts = False
+        has_associated_parts, parts_check_message = try_is_element_associated_with_parts(
+            self.doc, wall.Id
+        )
+        if parts_check_message:
+            self.log_diagnostic(
+                "Проверка разбивки на части: {0}.".format(parts_check_message)
+            )
         if has_associated_parts:
             self.add_blocking_reason(detected_reasons, "стена разбита на части (Parts)")
 
-        phase_created_param = wall.get_Parameter(BuiltInParameter.WALL_PHASE_CREATED)
-        if phase_created_param and phase_created_param.HasValue:
+        phase_created_param, phase_message = try_get_element_parameter(
+            wall, "WALL_PHASE_CREATED"
+        )
+        if phase_message:
+            self.log_diagnostic(
+                "Стена {0}: параметр WALL_PHASE_CREATED недоступен ({1}).".format(
+                    format_element_id(wall.Id),
+                    phase_message,
+                )
+            )
+        elif phase_created_param and phase_created_param.HasValue:
             phase_created_id = phase_created_param.AsElementId()
             active_phase_id = self.doc.ActiveView.PhaseId if self.doc.ActiveView else ElementId.InvalidElementId
             if active_phase_id != ElementId.InvalidElementId and active_phase_id != phase_created_id:
@@ -1282,8 +1594,18 @@ class WallLayerSplitterCommand(object):
     def set_structural_material(self, wall_type, material_id):
         if material_id == ElementId.InvalidElementId:
             return
-        structural_param = wall_type.get_Parameter(BuiltInParameter.STRUCTURAL_MATERIAL_PARAM)
-        try_set_parameter(structural_param, lambda: structural_param.Set(material_id))
+        structural_param, structural_message = try_get_element_parameter(
+            wall_type, "STRUCTURAL_MATERIAL_PARAM"
+        )
+        if structural_message:
+            LOGGER.debug(
+                "Не удалось установить STRUCTURAL_MATERIAL_PARAM для типа стены %s: %s",
+                format_element_id(wall_type.Id) if hasattr(wall_type, "Id") else "<нет ID>",
+                structural_message,
+            )
+            return
+        if structural_param:
+            try_set_parameter(structural_param, lambda: structural_param.Set(material_id))
 
     def build_layer_type_name(self, base_type, layer, index):
         material_name = "Без материала"
@@ -1308,24 +1630,43 @@ DEFAULT_PARAMETERS_TO_COPY = []
 
 
 def build_default_parameters():
-    parameters = [
-        BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS,
-        BuiltInParameter.ALL_MODEL_MARK,
-        BuiltInParameter.WALL_BASE_OFFSET,
-        BuiltInParameter.WALL_BASE_CONSTRAINT,
-        BuiltInParameter.WALL_TOP_OFFSET,
-        BuiltInParameter.WALL_HEIGHT_TYPE,
-        BuiltInParameter.WALL_USER_HEIGHT_PARAM,
-        BuiltInParameter.WALL_STRUCTURAL_SIGNIFICANT,
-        BuiltInParameter.WALL_ATTR_ROOM_BOUNDING,
+    required_names = [
+        "ALL_MODEL_INSTANCE_COMMENTS",
+        "ALL_MODEL_MARK",
+        "WALL_BASE_OFFSET",
+        "WALL_BASE_CONSTRAINT",
+        "WALL_TOP_OFFSET",
+        "WALL_HEIGHT_TYPE",
+        "WALL_USER_HEIGHT_PARAM",
+        "WALL_STRUCTURAL_SIGNIFICANT",
+        "WALL_ATTR_ROOM_BOUNDING",
     ]
-    for name in ("WALL_FIRE_RATING_PARAM", "WALL_ATTR_FIRE_RATING"):
-        try:
-            param = getattr(BuiltInParameter, name)
-            if param not in parameters:
-                parameters.append(param)
-        except AttributeError:
+    optional_names = ["WALL_FIRE_RATING_PARAM", "WALL_ATTR_FIRE_RATING"]
+
+    parameters = []
+    for name in required_names:
+        parameter, message = try_resolve_builtin_parameter(name)
+        if parameter is not None:
+            parameters.append(parameter)
+        else:
+            LOGGER.debug(
+                "BuiltInParameter.%s не будет копироваться: %s",
+                name,
+                message,
+            )
+
+    for name in optional_names:
+        parameter, message = try_resolve_builtin_parameter(name)
+        if parameter is None:
+            LOGGER.debug(
+                "BuiltInParameter.%s не найден и будет пропущен: %s",
+                name,
+                message,
+            )
             continue
+        if parameter not in parameters:
+            parameters.append(parameter)
+
     return parameters
 
 
@@ -1390,7 +1731,10 @@ def choose_layer_by_function(layer_infos):
 def try_rehost_family_instance(family_instance, new_host):
     if family_instance is None or new_host is None:
         return False
-    host_param = family_instance.get_Parameter(BuiltInParameter.HOST_ID_PARAM)
+    host_param, host_message = try_get_element_parameter(family_instance, "HOST_ID_PARAM")
+    if host_message:
+        return False
+
     if host_param is None or host_param.IsReadOnly:
         return False
     try:
@@ -1477,11 +1821,8 @@ def get_document_username(document):
 def get_element_owner_name(element):
     if element is None:
         return ""
-    try:
-        owner_param = element.get_Parameter(BuiltInParameter.EDITED_BY)
-    except Exception:  # noqa: BLE001
-        owner_param = None
-    if owner_param is None:
+    owner_param, owner_message = try_get_element_parameter(element, "EDITED_BY")
+    if owner_message or owner_param is None:
         return ""
     try:
         owner_value = owner_param.AsString()
@@ -1530,8 +1871,14 @@ def get_design_option_id(element):
             return design_option.Id
     except InvalidOperationException:
         pass
-    option_param = element.get_Parameter(BuiltInParameter.DESIGN_OPTION_ID)
-    return option_param.AsElementId() if option_param else ElementId.InvalidElementId
+    option_param, option_message = try_get_element_parameter(element, "DESIGN_OPTION_ID")
+    if option_message or option_param is None:
+        return ElementId.InvalidElementId
+
+    try:
+        return option_param.AsElementId()
+    except Exception:  # noqa: BLE001
+        return ElementId.InvalidElementId
 
 
 def build_design_option_description(document, design_option_id):
