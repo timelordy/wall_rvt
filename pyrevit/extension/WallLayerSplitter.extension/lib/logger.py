@@ -12,13 +12,15 @@
 пока отсутствует.
 """
 
-from __future__ import annotations
-
 import logging
 import logging.handlers
 import os
 import threading
-from typing import Optional
+
+try:  # typing может отсутствовать в окружении IronPython 2.x
+    from typing import Optional
+except Exception:  # noqa: BLE001
+    Optional = None  # type: ignore[assignment]
 
 try:  # pragma: no cover - pyRevit доступен только внутри Revit
     from pyrevit import script  # type: ignore
@@ -28,7 +30,7 @@ except Exception:  # noqa: BLE001
 
 _FALLBACK_LOGGER_NAME = "WallLayerSplitter"
 _FALLBACK_LOGGER_LOCK = threading.Lock()
-_FALLBACK_LOGGER: Optional[logging.Logger] = None
+_FALLBACK_LOGGER = None  # type: Optional[logging.Logger]
 
 
 def _get_default_log_dir():
@@ -62,10 +64,14 @@ def _ensure_log_dir():
     """Убедиться, что каталог логов существует."""
 
     log_dir = _get_default_log_dir()
+    if not log_dir:
+        return log_dir
+
     try:
-        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(log_dir)
     except Exception:  # noqa: BLE001
-        pass
+        if not os.path.isdir(log_dir):
+            raise
     return log_dir
 
 
