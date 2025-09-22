@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """Разделение многослойных стен на отдельные стены по слоям."""
 
-from __future__ import annotations
 
 import enum
 import math
