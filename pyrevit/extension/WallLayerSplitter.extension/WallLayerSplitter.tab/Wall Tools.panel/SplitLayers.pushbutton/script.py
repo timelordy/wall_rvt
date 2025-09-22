@@ -1041,7 +1041,11 @@ class WallLayerSplitterCommand(object):
         design_option_id = get_design_option_id(wall)
         try:
             active_option = self.doc.ActiveDesignOptionId
-        except InvalidOperationException:
+        except (AttributeError, InvalidOperationException):
+            # Свойство ActiveDesignOptionId появилось в API Revit сравнительно недавно,
+            # поэтому на старых версиях приложения его может не быть. В этом случае,
+            # а также если Revit запрещает читать активную дизайн-опцию, считаем,
+            # что активной опции нет (ElementId.InvalidElementId).
             active_option = ElementId.InvalidElementId
         if design_option_id != ElementId.InvalidElementId and design_option_id != active_option:
             option_description = build_design_option_description(self.doc, design_option_id)
