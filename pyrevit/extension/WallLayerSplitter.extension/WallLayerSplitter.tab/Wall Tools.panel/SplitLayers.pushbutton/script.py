@@ -176,6 +176,19 @@ def format_element_id(element_id, fallback_value=None):
     return str(element_id)
 
 
+def try_get_wall_type(document, wall):
+    if document is None or wall is None:
+        return None
+
+    try:
+        type_id = wall.GetTypeId()
+        if not type_id:
+            return None
+        return document.GetElement(type_id)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class WallLocationReference(enum.IntEnum):
     WALL_CENTERLINE = 0
     CORE_CENTERLINE = 1
@@ -230,7 +243,18 @@ class WallSelectionFilter(ISelectionFilter):
 
 
 def has_multiple_layers(wall):
-    structure = wall.WallType.GetCompoundStructure() if wall and wall.WallType else None
+    if wall is None:
+        return False
+
+    document = getattr(wall, "Document", None)
+    wall_type = try_get_wall_type(document, wall)
+    if wall_type is None:
+        return False
+
+    try:
+        structure = wall_type.GetCompoundStructure() if wall_type else None
+    except Exception:  # noqa: BLE001
+        return False
     return bool(structure and structure.LayerCount > 1)
 
 
@@ -289,12 +313,22 @@ class WallLayerSplitterCommand(object):
 
                 for wall in target_walls:
                     wall_id = wall.Id.IntegerValue
-                    wall_type_name = wall.WallType.Name if wall.WallType else "<без типа>"
+                    base_type = try_get_wall_type(self.doc, wall)
+                    if base_type is None:
+                        LOGGER.info(
+                            "Стена %s пропущена: не удалось получить тип стены.", wall_id
+                        )
+                        self.report_skip_reason(
+                            wall.Id, "не удалось определить тип стены (ошибка доступа к типу)"
+                        )
+                        continue
+
+                    wall_type_name = getattr(base_type, "Name", None) or "<без типа>"
                     LOGGER.info("Обработка стены %s (тип '%s').", wall_id, wall_type_name)
                     self.log_diagnostic(
                         "Стена {0}: начало обработки (тип \"{1}\").".format(wall_id, wall_type_name)
                     )
-                    if not self.is_wall_type_accepted(wall.WallType):
+                    if not self.is_wall_type_accepted(base_type):
                         LOGGER.info("Стена %s пропущена фильтром типов.", wall_id)
                         continue
 
@@ -398,7 +432,24 @@ class WallLayerSplitterCommand(object):
         wall_label = format_element_id(original_wall_id, wall_id_value)
         self.log_diagnostic("Стена {0}: сбор исходных данных.".format(wall_label))
 
-        structure = wall.WallType.GetCompoundStructure() if wall.WallType else None
+        base_type = try_get_wall_type(self.doc, wall)
+        if base_type is None:
+            LOGGER.debug(
+                "SplitWall: стена %s пропущена — не удалось получить тип стены.",
+                wall_label,
+            )
+            self.report_skip_reason(
+                original_wall_id,
+                "не удалось определить тип стены (ошибка доступа к типу)",
+            )
+            self.log_diagnostic(
+                "Стена {0}: пропущена — не удалось получить тип стены.".format(
+                    wall_label
+                )
+            )
+            return None
+
+        structure = base_type.GetCompoundStructure() if base_type else None
         if not structure or structure.LayerCount <= 1:
             LOGGER.debug(
                 "SplitWall: стена %s пропущена — состав конструкции отсутствует или один слой.",
@@ -470,7 +521,7 @@ class WallLayerSplitterCommand(object):
             if layer.Width <= 0:
                 continue
 
-            layer_type = self.get_or_create_layer_type(wall.WallType, layer, index)
+            layer_type = self.get_or_create_layer_type(base_type, layer, index)
             self.log_diagnostic(
                 "Стена {0}: обработка слоя {1}, толщина {2:.3f}.".format(
                     wall_label, index + 1, layer.Width
