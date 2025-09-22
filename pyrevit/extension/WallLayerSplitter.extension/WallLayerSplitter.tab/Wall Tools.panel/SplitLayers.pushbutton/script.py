@@ -118,6 +118,9 @@ class WallLayerSplitterCommand(object):
             return
 
         LOGGER.info("Запуск команды WallLayerSplitter.")
+        self.skip_messages = []
+        self.diagnostic_log = []
+        self.log_diagnostic("Команда запущена.")
 
         target_walls = list(self.collect_target_walls(ui_doc))
         if not target_walls:
@@ -127,10 +130,9 @@ class WallLayerSplitterCommand(object):
             return
 
         LOGGER.info("Найдено %s стен(ы) для обработки.", len(target_walls))
+        self.log_diagnostic("Найдено для обработки стен: {0}.".format(len(target_walls)))
 
         split_results = []
-        self.skip_messages = []
-        self.diagnostic_log = []
 
         tgroup = TransactionGroup(self.doc, "Разделение слоёв стен")
         try:
@@ -146,6 +148,9 @@ class WallLayerSplitterCommand(object):
                     wall_id = wall.Id.IntegerValue
                     wall_type_name = wall.WallType.Name if wall.WallType else "<без типа>"
                     LOGGER.info("Обработка стены %s (тип '%s').", wall_id, wall_type_name)
+                    self.log_diagnostic(
+                        "Стена {0}: начало обработки (тип \"{1}\").".format(wall_id, wall_type_name)
+                    )
                     if not self.is_wall_type_accepted(wall.WallType):
                         LOGGER.info("Стена %s пропущена фильтром типов.", wall_id)
                         continue
@@ -154,8 +159,14 @@ class WallLayerSplitterCommand(object):
                     if result:
                         split_results.append(result)
                         LOGGER.info("Стена %s успешно разделена.", wall_id)
+                        self.log_diagnostic(
+                            "Стена {0}: разделение завершено, создано стен {1}.".format(
+                                wall_id, len(result.created_wall_ids)
+                            )
+                        )
                     else:
                         LOGGER.info("Стена %s не была разделена.", wall_id)
+                        self.log_diagnostic("Стена {0}: разделение не выполнено.".format(wall_id))
 
                 if not split_results:
                     skip_details = self.build_skip_details(self.skip_messages)
@@ -163,6 +174,7 @@ class WallLayerSplitterCommand(object):
                     if skip_details:
                         message = "{}\n\n{}".format(message, skip_details)
                     LOGGER.warning("Ни одна стена не обработана. Откат транзакций.")
+                    self.log_diagnostic("Ни одна стена не была разделена, выполняется откат изменений.")
                     TaskDialog.Show("Разделение слоев стен", message)
                     transaction.RollBack()
                     tgroup.RollBack()
@@ -184,7 +196,12 @@ class WallLayerSplitterCommand(object):
         except Exception as error:  # noqa: BLE001
             LOGGER.exception("Команда завершилась с ошибкой: %s", error)
             tgroup.RollBack()
-            TaskDialog.Show("Разделение слоев стен", "Ошибка: {}".format(error))
+            diagnostics = self.get_recent_diagnostics()
+            if diagnostics:
+                LOGGER.error("Диагностические сообщения перед ошибкой:\n%s", "\n".join(diagnostics))
+            failure_message = self.build_error_dialog_message(error, diagnostics)
+            TaskDialog.Show("Разделение слоев стен", failure_message)
+            self.print_diagnostics_to_output(error, diagnostics)
             return
 
         self.show_summary(split_results, self.skip_messages)
@@ -197,18 +214,23 @@ class WallLayerSplitterCommand(object):
         walls = []
 
         if selected_ids:
+            self.log_diagnostic(
+                "Выбрано заранее элементов: {0}. Фильтрация стен.".format(len(selected_ids))
+            )
             for element_id in selected_ids:
                 element = document.GetElement(element_id)
                 if isinstance(element, Wall) and has_multiple_layers(element):
                     walls.append(element)
 
         if walls:
+            self.log_diagnostic("Использована предварительная выборка стен: {0}.".format(len(walls)))
             return walls
 
         try:
             picked_refs = selection.PickObjects(ObjectType.Element, WallSelectionFilter(), "Выберите стены для разделения")
         except OperationCanceledException:
             LOGGER.info("Выбор объектов отменён пользователем.")
+            self.log_diagnostic("Пользователь отменил выбор стен.")
             return []
 
         for reference in picked_refs:
@@ -216,6 +238,8 @@ class WallLayerSplitterCommand(object):
             if isinstance(element, Wall) and has_multiple_layers(element):
                 walls.append(element)
 
+        if walls:
+            self.log_diagnostic("Выбрано стен после запроса: {0}.".format(len(walls)))
         return walls
 
     def is_wall_type_accepted(self, wall_type):
@@ -227,15 +251,20 @@ class WallLayerSplitterCommand(object):
             return None
 
         wall_id = wall.Id.IntegerValue
+        self.log_diagnostic("Стена {0}: сбор исходных данных.".format(wall_id))
 
         structure = wall.WallType.GetCompoundStructure() if wall.WallType else None
         if not structure or structure.LayerCount <= 1:
             LOGGER.debug("SplitWall: стена %s пропущена — состав конструкции отсутствует или один слой.", wall_id)
+            self.log_diagnostic(
+                "Стена {0}: пропущена — нет составной конструкции или один слой.".format(wall_id)
+            )
             return None
 
         location = wall.Location
         if not isinstance(location, LocationCurve) or location.Curve is None:
             LOGGER.debug("SplitWall: стена %s не имеет LocationCurve.", wall_id)
+            self.log_diagnostic("Стена {0}: отсутствует геометрия LocationCurve.".format(wall_id))
             return None
 
         hosted_family_ids = wall.GetDependentElements(ElementClassFilter(FamilyInstance))
@@ -252,6 +281,9 @@ class WallLayerSplitterCommand(object):
                     delete_reason = "не удалось временно отвязать семейства: {}".format(failed_list)
             self.restore_family_instances_to_host(detached_instances, wall)
             self.report_skip_reason(wall.Id, "невозможно удалить исходную стену: {}".format(delete_reason))
+            self.log_diagnostic(
+                "Стена {0}: невозможно удалить исходную стену ({1}).".format(wall_id, delete_reason or "неизвестная причина")
+            )
             return None
 
         base_curve = location.Curve
@@ -283,6 +315,11 @@ class WallLayerSplitterCommand(object):
                 continue
 
             layer_type = self.get_or_create_layer_type(wall.WallType, layer, index)
+            self.log_diagnostic(
+                "Стена {0}: обработка слоя {1}, толщина {2:.3f}.".format(
+                    wall_id, index + 1, layer.Width
+                )
+            )
             layer_center_offset = self.calculate_layer_center_offset(layers, index, exterior_face_offset)
             layer_offset_from_reference = reference_offset + layer_center_offset
             offset_curve = self.create_offset_curve(base_curve, orientation, layer_offset_from_reference)
@@ -307,15 +344,17 @@ class WallLayerSplitterCommand(object):
         if not created_walls:
             TaskDialog.Show("Разделение слоев стен", "Не удалось создать новые стены для исходной стены {}.".format(wall_id))
             self.restore_family_instances_to_host(detached_instances, wall)
+            self.log_diagnostic("Стена {0}: новые стены не созданы.".format(wall_id))
             return None
 
         try:
+            self.log_diagnostic("Стена {0}: удаление исходной стены.".format(wall_id))
             self.doc.Delete(wall.Id)
         except InvalidOperationException as ex:
             self.restore_family_instances_to_host(detached_instances, wall)
             raise InvalidOperationException(
                 "Не удалось удалить исходную стену (ID: {}). Подробности: {}".format(wall_id, ex.Message)
-            )
+        )
         except ArgumentException as ex:
             self.restore_family_instances_to_host(detached_instances, wall)
             raise InvalidOperationException(
@@ -345,11 +384,22 @@ class WallLayerSplitterCommand(object):
         return result
 
     def get_or_create_layer_type(self, base_type, layer, index):
+        base_type_name = base_type.Name if isinstance(base_type, WallType) else "<без типа>"
+        self.log_diagnostic(
+            "  Слой {0}: поиск или создание типа на основе \"{1}\".".format(
+                index + 1, base_type_name
+            )
+        )
         cache_key = self.build_layer_type_key(base_type.Id, layer, index)
         cached_id = self.layer_type_cache.get(cache_key)
         if cached_id:
             existing = self.doc.GetElement(cached_id)
             if isinstance(existing, WallType):
+                self.log_diagnostic(
+                    "  Слой {0}: найден кешированный тип (ID {1}).".format(
+                        index + 1, existing.Id.IntegerValue
+                    )
+                )
                 return existing
             self.layer_type_cache.pop(cache_key, None)
 
@@ -357,11 +407,17 @@ class WallLayerSplitterCommand(object):
         for candidate in FilteredElementCollector(self.doc).OfClass(WallType).ToElements():
             if isinstance(candidate, WallType) and candidate.Name.lower() == type_name.lower():
                 self.layer_type_cache[cache_key] = candidate.Id
+                self.log_diagnostic(
+                    "  Слой {0}: найден существующий тип \"{1}\".".format(index + 1, candidate.Name)
+                )
                 return candidate
 
         existing = self.find_wall_type_by_name(type_name)
         if isinstance(existing, WallType):
             self.layer_type_cache[cache_key] = existing.Id
+            self.log_diagnostic(
+                "  Слой {0}: использован тип \"{1}\" из словаря.".format(index + 1, existing.Name)
+            )
             return existing
 
         duplicated = self.duplicate_wall_type_with_safe_name(base_type, type_name, index)
@@ -373,6 +429,11 @@ class WallLayerSplitterCommand(object):
         new_structure.SetLayers(new_layers)
         duplicated.SetCompoundStructure(new_structure)
         self.set_structural_material(duplicated, layer.MaterialId)
+        self.log_diagnostic(
+            "  Слой {0}: создан новый тип \"{1}\" (ID {2}).".format(
+                index + 1, duplicated.Name, duplicated.Id.IntegerValue
+            )
+        )
 
         self.layer_type_cache[cache_key] = duplicated.Id
         return duplicated
@@ -390,9 +451,19 @@ class WallLayerSplitterCommand(object):
                     candidate_name,
                     attempt,
                 )
+                self.log_diagnostic(
+                    "  Слой {0}: имя \"{1}\" уже занято (попытка {2}).".format(
+                        layer_index + 1, candidate_name, attempt
+                    )
+                )
                 continue
 
             try:
+                self.log_diagnostic(
+                    "  Слой {0}: попытка {1} создать тип \"{2}\".".format(
+                        layer_index + 1, attempt, candidate_name
+                    )
+                )
                 duplicated = base_type.Duplicate(candidate_name)
 
             except (ArgumentException, InvalidOperationException) as error:
@@ -402,21 +473,36 @@ class WallLayerSplitterCommand(object):
                     attempt,
                     error,
                 )
+                self.log_diagnostic(
+                    "  Слой {0}: ошибка при создании типа \"{1}\" (попытка {2}) — {3}.".format(
+                        layer_index + 1,
+                        candidate_name,
+                        attempt,
+                        self.extract_error_message(error),
+                    )
+                )
                 continue
 
             if isinstance(duplicated, WallType):
                 self.register_wall_type(duplicated)
+                self.log_diagnostic(
+                    "  Слой {0}: успешно создан тип \"{1}\" (ID {2}).".format(
+                        layer_index + 1, duplicated.Name, duplicated.Id.IntegerValue
+                    )
+                )
                 return duplicated
 
             raise InvalidOperationException(
                 "Получен некорректный тип при дублировании слоя {}.".format(layer_index + 1)
             )
 
-        raise InvalidOperationException(
+        message = (
             "Не удалось подобрать уникальное имя типа для слоя {}. Сократите имена материалов или исходных типов.".format(
                 layer_index + 1
             )
         )
+        self.log_diagnostic("  Слой {0}: все попытки исчерпаны без успеха.".format(layer_index + 1))
+        raise InvalidOperationException(message)
 
     def prepare_layer_type_base_name(self, desired_name):
         base_name = (desired_name or "").strip()
@@ -864,6 +950,72 @@ class WallLayerSplitterCommand(object):
         if not message:
             return
         self.diagnostic_log.append(message)
+        if len(self.diagnostic_log) > 100:
+            self.diagnostic_log = self.diagnostic_log[-100:]
+
+    def get_recent_diagnostics(self, limit=10):
+        if not self.diagnostic_log:
+            return []
+        if not limit or limit <= 0:
+            return list(self.diagnostic_log)
+        return self.diagnostic_log[-limit:]
+
+    @staticmethod
+    def extract_error_message(error):
+        if error is None:
+            return ""
+        message = getattr(error, "Message", None)
+        if message:
+            return str(message)
+        return str(error)
+
+    @staticmethod
+    def extract_error_type_name(error):
+        if error is None:
+            return ""
+        try:
+            get_type = getattr(error, "GetType", None)
+            if callable(get_type):
+                dotnet_type = get_type()
+                if dotnet_type is not None:
+                    return str(dotnet_type.FullName)
+        except Exception:  # noqa: BLE001
+            pass
+        return error.__class__.__name__
+
+    def build_error_dialog_message(self, error, diagnostics):
+        error_message = self.extract_error_message(error) or "Неизвестная ошибка"
+        error_type = self.extract_error_type_name(error)
+
+        lines = [
+            "Произошла ошибка при разделении стен.",
+        ]
+        if error_type:
+            lines.append("Тип: {0}".format(error_type))
+        if error_message:
+            lines.append("Сообщение: {0}".format(error_message))
+
+        if diagnostics:
+            lines.append("")
+            lines.append("Последние действия:")
+            for entry in diagnostics:
+                lines.append("- {0}".format(entry))
+
+        lines.append("")
+        lines.append("Подробности см. в журнале pyRevit.")
+        return "\n".join(lines)
+
+    def print_diagnostics_to_output(self, error, diagnostics):
+        if error is not None:
+            error_message = self.extract_error_message(error).replace("`", "'")
+            error_type = self.extract_error_type_name(error)
+            OUTPUT.print_md("**Ошибка:** `{0}` ({1})".format(error_message, error_type))
+
+        if diagnostics:
+            formatted = "\n".join("* {0}".format(entry) for entry in diagnostics)
+            OUTPUT.print_md("### Диагностика\n{0}".format(formatted))
+        else:
+            OUTPUT.print_md("Диагностическая информация отсутствует. Проверьте журнал pyRevit.")
 
     def build_layer_type_key(self, base_type_id, layer, index):
         material_id = layer.MaterialId.IntegerValue if layer.MaterialId else -1
