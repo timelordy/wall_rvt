@@ -383,6 +383,44 @@ def try_get_parameter_value(element, parameter_name, extractor, description=None
         return None, "не удалось прочитать BuiltInParameter.{0}: {1}".format(parameter_name, error)
 
 
+def safe_get_name(entity):
+    """Безопасно получить свойство Name у объектов Revit API."""
+
+    if entity is None:
+        return ""
+
+    try:
+        value = getattr(entity, "Name")
+    except AttributeError:
+        return ""
+    except Exception as error:  # noqa: BLE001
+        LOGGER.debug(
+            "Не удалось получить свойство Name у объекта типа %s: %s",
+            type(entity).__name__,
+            error,
+        )
+        return ""
+
+    try:
+        if callable(value):
+            value = value()
+    except Exception as error:  # noqa: BLE001
+        LOGGER.debug(
+            "Не удалось вычислить значение свойства Name у объекта типа %s: %s",
+            type(entity).__name__,
+            error,
+        )
+        return ""
+
+    if not value:
+        return ""
+
+    try:
+        return str(value).strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 class WallLocationReference(enum.IntEnum):
     WALL_CENTERLINE = 0
     CORE_CENTERLINE = 1
@@ -1713,8 +1751,10 @@ class WallLayerSplitterCommand(object):
         material_name = "Без материала"
         if layer.MaterialId != ElementId.InvalidElementId:
             material = base_type.Document.GetElement(layer.MaterialId)
-            if isinstance(material, Material) and material.Name:
-                material_name = material.Name
+            if isinstance(material, Material):
+                material_value = safe_get_name(material)
+                if material_value:
+                    material_name = material_value
         millimeters_per_foot = 304.8
         width_mm = layer.Width * millimeters_per_foot
         components = [
@@ -1954,9 +1994,10 @@ def is_owned_by_another_user(owner_name, current_username):
 def build_element_description(element):
     if element is None:
         return "неизвестный элемент"
-    category_name = element.Category.Name if element.Category else ""
-    element_name = element.Name or ""
-    identifier = element.Id.IntegerValue
+    category = getattr(element, "Category", None)
+    category_name = safe_get_name(category)
+    element_name = safe_get_name(element)
+    identifier = get_element_id_value(getattr(element, "Id", None)) or 0
     if category_name and element_name:
         return "{0} \"{1}\" (ID {2})".format(category_name, element_name, identifier)
     if element_name:
@@ -1988,8 +2029,10 @@ def build_design_option_description(document, design_option_id):
         identifier = design_option_id.IntegerValue if isinstance(design_option_id, ElementId) else 0
         return "ID {0}".format(identifier)
     element = document.GetElement(design_option_id)
-    if isinstance(element, DesignOption) and element.Name:
-        return '\"{0}\" (ID {1})'.format(element.Name, design_option_id.IntegerValue)
+    if isinstance(element, DesignOption):
+        option_name = safe_get_name(element)
+        if option_name:
+            return '\"{0}\" (ID {1})'.format(option_name, design_option_id.IntegerValue)
     return "ID {0}".format(design_option_id.IntegerValue)
 
 
@@ -1998,8 +2041,10 @@ def build_assembly_description(document, assembly_id):
         identifier = assembly_id.IntegerValue if isinstance(assembly_id, ElementId) else 0
         return "ID {0}".format(identifier)
     element = document.GetElement(assembly_id)
-    if isinstance(element, AssemblyInstance) and element.Name:
-        return '\"{0}\" (ID {1})'.format(element.Name, assembly_id.IntegerValue)
+    if isinstance(element, AssemblyInstance):
+        assembly_name = safe_get_name(element)
+        if assembly_name:
+            return '\"{0}\" (ID {1})'.format(assembly_name, assembly_id.IntegerValue)
     return "ID {0}".format(assembly_id.IntegerValue)
 
 
@@ -2008,8 +2053,10 @@ def build_phase_description(document, phase_id):
         identifier = phase_id.IntegerValue if isinstance(phase_id, ElementId) else 0
         return "ID {0}".format(identifier)
     element = document.GetElement(phase_id)
-    if isinstance(element, Phase) and element.Name:
-        return '\"{0}\" (ID {1})'.format(element.Name, phase_id.IntegerValue)
+    if isinstance(element, Phase):
+        phase_name = safe_get_name(element)
+        if phase_name:
+            return '\"{0}\" (ID {1})'.format(phase_name, phase_id.IntegerValue)
     return "ID {0}".format(phase_id.IntegerValue)
 
 
