@@ -250,7 +250,8 @@ class WallLayerSplitterCommand(object):
             LOGGER.debug("SplitWall: передана пустая стена.")
             return None
 
-        wall_id = wall.Id.IntegerValue
+        original_wall_id = wall.Id
+        wall_id = original_wall_id.IntegerValue
         self.log_diagnostic("Стена {0}: сбор исходных данных.".format(wall_id))
 
         structure = wall.WallType.GetCompoundStructure() if wall.WallType else None
@@ -280,7 +281,7 @@ class WallLayerSplitterCommand(object):
                 else:
                     delete_reason = "не удалось временно отвязать семейства: {}".format(failed_list)
             self.restore_family_instances_to_host(detached_instances, wall)
-            self.report_skip_reason(wall.Id, "невозможно удалить исходную стену: {}".format(delete_reason))
+            self.report_skip_reason(original_wall_id, "невозможно удалить исходную стену: {}".format(delete_reason))
             self.log_diagnostic(
                 "Стена {0}: невозможно удалить исходную стену ({1}).".format(wall_id, delete_reason or "неизвестная причина")
             )
@@ -349,7 +350,7 @@ class WallLayerSplitterCommand(object):
 
         try:
             self.log_diagnostic("Стена {0}: удаление исходной стены.".format(wall_id))
-            self.doc.Delete(wall.Id)
+            self.doc.Delete(original_wall_id)
         except InvalidOperationException as ex:
             self.restore_family_instances_to_host(detached_instances, wall)
             raise InvalidOperationException(
@@ -374,7 +375,7 @@ class WallLayerSplitterCommand(object):
         )
 
         result = WallSplitResult(
-            wall.Id,
+            original_wall_id,
             created_walls,
             rehosted_instances,
             unmatched_instances,
