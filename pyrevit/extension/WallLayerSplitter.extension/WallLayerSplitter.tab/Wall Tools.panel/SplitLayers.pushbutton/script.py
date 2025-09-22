@@ -234,17 +234,21 @@ def try_get_active_view_phase_id(document):
     if view is None:
         return ElementId.InvalidElementId, "активный вид недоступен для чтения фазы"
 
+
+    _property_missing = object()
+    phase_id = _property_missing
     try:
         phase_id = getattr(view, "PhaseId")
     except AttributeError:
-        phase_id = None
-    except Exception as error:  # noqa: BLE001
+        phase_id = _property_missing
+    except BaseException as error:  # noqa: BLE001
         LOGGER.debug(
             "Чтение свойства PhaseId у активного вида завершилось ошибкой: %s",
             error,
         )
-        phase_id = None
-    else:
+        phase_id = _property_missing
+
+    if phase_id is not _property_missing:
         if isinstance(phase_id, ElementId):
             return phase_id, ""
         if phase_id is not None:
@@ -252,6 +256,7 @@ def try_get_active_view_phase_id(document):
                 "Свойство PhaseId активного вида вернуло значение неизвестного типа %s.",
                 type(phase_id),
             )
+
     parameter, message = try_get_element_parameter(view, "VIEW_PHASE")
     if message:
         return ElementId.InvalidElementId, message
@@ -1432,16 +1437,6 @@ class WallLayerSplitterCommand(object):
         if assembly_id and assembly_id != ElementId.InvalidElementId:
             assembly_description = build_assembly_description(self.doc, assembly_id)
             self.add_blocking_reason(detected_reasons, "стена входит в сборку {}".format(assembly_description))
-
-        has_associated_parts, parts_check_message = try_is_element_associated_with_parts(
-            self.doc, wall.Id
-        )
-        if parts_check_message:
-            self.log_diagnostic(
-                "Проверка разбивки на части: {0}.".format(parts_check_message)
-            )
-        if has_associated_parts:
-            self.add_blocking_reason(detected_reasons, "стена разбита на части (Parts)")
 
         phase_created_param, phase_message = try_get_element_parameter(
             wall, "WALL_PHASE_CREATED"
