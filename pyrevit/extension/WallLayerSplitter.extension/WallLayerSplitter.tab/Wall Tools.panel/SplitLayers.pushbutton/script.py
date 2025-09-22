@@ -50,7 +50,7 @@ try:  # pragma: no cover - импорт работает только внутр
     from Autodesk.Revit.UI import TaskDialog
     from Autodesk.Revit.UI.Selection import ISelectionFilter, ObjectType
 except Exception:  # pragma: no cover - использование заглушек вне Revit
-    from revit_stub import (  # type: ignore
+    from revit_stub import (  # type: ignore  # noqa: I001
         ArgumentException,
         AssemblyInstance,
         BuiltInParameter,
@@ -63,6 +63,7 @@ except Exception:  # pragma: no cover - использование заглуш�
         HostObject,
         ISelectionFilter,
         IntersectionResult,
+        InvalidOperationException,
         JoinGeometryUtils,
         LocationCurve,
         LocationPoint,
@@ -82,7 +83,6 @@ except Exception:  # pragma: no cover - использование заглуш�
         WallUtils,
         WorksetId,
         XYZ,
-        InvalidOperationException,
     )
     REVIT_API_AVAILABLE = False
 
@@ -223,15 +223,41 @@ def try_is_element_associated_with_parts(document, element_id):
 _MISSING_VALUE = object()
 
 
+_BUILTIN_PARAMETER_FALLBACKS = {
+    # В более старых версиях Revit для фаз используются общие параметры
+    # PHASE_CREATED/PHASE_DEMOLISHED без префикса WALL_.
+    "WALL_PHASE_CREATED": ("PHASE_CREATED",),
+    "WALL_PHASE_DEMOLISHED": ("PHASE_DEMOLISHED",),
+}
+
+
 def try_resolve_builtin_parameter(parameter_name):
     value = getattr(BuiltInParameter, parameter_name, _MISSING_VALUE)
-    if value is _MISSING_VALUE:
-        message = "API не содержит BuiltInParameter.{0}".format(parameter_name)
+    if value is not _MISSING_VALUE:
+        return value, ""
+
+    fallback_names = _BUILTIN_PARAMETER_FALLBACKS.get(parameter_name, ())
+    for fallback_name in fallback_names:
+        fallback_value = getattr(BuiltInParameter, fallback_name, _MISSING_VALUE)
+        if fallback_value is not _MISSING_VALUE:
+            LOGGER.debug(
+                "BuiltInParameter.%s отсутствует, используется BuiltInParameter.%s.",
+                parameter_name,
+                fallback_name,
+            )
+            return fallback_value, ""
+
+    message = "API не содержит BuiltInParameter.{0}".format(parameter_name)
+    LOGGER.debug(
+        "BuiltInParameter.%s отсутствует в текущей версии API.", parameter_name
+    )
+    if fallback_names:
         LOGGER.debug(
-            "BuiltInParameter.%s отсутствует в текущей версии API.", parameter_name
+            "Также не удалось найти резервные параметры для BuiltInParameter.%s: %s.",
+            parameter_name,
+            ", ".join(fallback_names),
         )
-        return None, message
-    return value, ""
+    return None, message
 
 
 def try_get_element_parameter(element, parameter_name):
